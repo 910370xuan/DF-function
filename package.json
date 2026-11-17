@@ -1,0 +1,8 @@
+{
+  "name": "df-function",
+  "private": true,
+  "description": "華暉 LINE 訂單自動化",
+  "scripts": {
+    "test": "node --test tests/core.test.js"
+  }
+}
