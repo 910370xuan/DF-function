@@ -126,3 +126,28 @@ test('批次編號與補單簽章', () => {
   assert.deepStrictEqual(Core.parseRowRange('36-70'), { start: 36, end: 70 });
   assert.throws(() => Core.parseRowRange('70-36'));
 });
+
+test('文字日期正規化', () => {
+  assert.strictEqual(Core.normalizeDate('2026/11/17'), '2026-11-17');
+  assert.strictEqual(Core.normalizeDate('2026-1-5'), '2026-01-05');
+  assert.strictEqual(Core.normalizeDate(' 115/11/17 '), '2026-11-17');
+  assert.strictEqual(Core.normalizeDate('11/17'), '');
+  assert.strictEqual(Core.normalizeDate(''), '');
+});
+
+test('診斷：說明為何沒有產單', () => {
+  const rows = [
+    { store: 'A', product: 'GPB-2000', qty: 1, status: '待出貨', shipDate: '2026-11-18' },
+    { store: 'A', product: 'GPB-2000', qty: 1, status: '待出貨', shipDate: '' },
+    { store: 'A', product: 'GPB-2000', qty: 1, status: '已產單', shipDate: '2026-11-17' },
+    { store: '', product: '', qty: '', status: '', shipDate: '' }
+  ];
+  const d = Core.diagnose(rows, '2026-11-17');
+  assert.strictEqual(d.total, 3);
+  assert.strictEqual(d.noDate, 1);
+  assert.deepStrictEqual(d.future, ['2026-11-18']);
+  const text = Core.describeDiagnosis(d, '2026-11-17');
+  assert.match(text, /讀到 3 筆/);
+  assert.match(text, /已產單 1 筆/);
+  assert.match(Core.describeDiagnosis(Core.diagnose([], 'x'), 'x'), /沒有讀到任何訂單列/);
+});

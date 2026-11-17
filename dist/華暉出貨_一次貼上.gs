@@ -121,6 +121,46 @@ var Core = (function () {
     return '';
   }
 
+  /**
+   * 文字日期轉成 'YYYY-MM-DD'；接受 2026/11/17、2026-11-17、2026.11.17、民國 115/11/17。
+   * 無法辨識回傳 ''。
+   */
+  function normalizeDate(s) {
+    var m = String(s == null ? '' : s).trim().match(/^(\d{2,4})[\/\-.](\d{1,2})[\/\-.](\d{1,2})$/);
+    if (!m) return '';
+    var y = Number(m[1]);
+    if (m[1].length <= 3) y += 1911;
+    var mo = Number(m[2]), d = Number(m[3]);
+    if (mo < 1 || mo > 12 || d < 1 || d > 31) return '';
+    return y + '-' + pad(mo, 2) + '-' + pad(d, 2);
+  }
+
+  /** 沒有產出任何出貨單時，說明每一列被略過的原因 */
+  function diagnose(rows, today) {
+    var out = { total: 0, byStatus: {}, noDate: 0, future: [], ready: 0 };
+    rows.forEach(function (r) {
+      if (!r.store && !r.product && !r.qty) return;
+      out.total++;
+      var st = r.status || '（空白）';
+      out.byStatus[st] = (out.byStatus[st] || 0) + 1;
+      if (r.status !== '待出貨') return;
+      if (!r.shipDate) out.noDate++;
+      else if (r.shipDate > today) out.future.push(r.shipDate);
+      else out.ready++;
+    });
+    return out;
+  }
+
+  function describeDiagnosis(d, today) {
+    if (!d.total) return '「出貨清單」工作表沒有讀到任何訂單列（請確認是填在「出貨清單」第 2 列以下，且有填店家）。';
+    var parts = ['讀到 ' + d.total + ' 筆訂單列'];
+    var st = Object.keys(d.byStatus).map(function (k) { return k + ' ' + d.byStatus[k] + ' 筆'; }).join('、');
+    parts.push('狀態：' + st);
+    if (d.noDate) parts.push(d.noDate + ' 筆「待出貨」沒有出貨日或日期格式無法辨識');
+    if (d.future.length) parts.push(d.future.length + ' 筆出貨日在今天（' + today + '）之後：' + d.future.slice(0, 5).join('、'));
+    return parts.join('；') + '。';
+  }
+
   /** 貨運單：每張工作表 6 格（2 頁 × 3 格），8 家 → [[6 家], [2 家]] → 3+3+2 頁 */
   function chunkLabels(stores) {
     var out = [];
@@ -204,6 +244,9 @@ var Core = (function () {
     nextBatchId: nextBatchId,
     pendingSignature: pendingSignature,
     findDuplicates: findDuplicates,
+    normalizeDate: normalizeDate,
+    diagnose: diagnose,
+    describeDiagnosis: describeDiagnosis,
     parseRowRange: parseRowRange
   };
 })();
@@ -318,8 +361,9 @@ function runBatch_(type, opts) {
     writeRowMessages_(orders, built.errors);
 
     if (!built.groups.length) {
-      var msg = type + '：今日無待出貨訂單' + (built.errors.length ? '（另有 ' + built.errors.length + ' 筆資料有誤，請看「系統訊息」欄）' : '');
-      if (!opts.manual || built.errors.length) notify_('【出貨】' + today + ' ' + msg, '<p>' + msg + '</p>', []);
+      var msg = type + '：今日無待出貨訂單' + (built.errors.length ? '（另有 ' + built.errors.length + ' 筆資料有誤，請看「系統訊息」欄）' : '') +
+        '\n\n診斷：' + Core.describeDiagnosis(Core.diagnose(orders.rows, today), today);
+      if (!opts.manual || built.errors.length) notify_('【出貨】' + today + ' ' + type + '：今日無待出貨訂單', '<p>' + esc_(msg).replace(/\n/g, '<br>') + '</p>', []);
       return { ok: true, message: msg };
     }
 
@@ -484,7 +528,7 @@ function readConfig_() {
   vals.forEach(function (r) {
     if (!r[0]) return;
     var v = r[1];
-    if (v instanceof Date) v = Utilities.formatDate(v, TZ, r[0].indexOf('時間') >= 0 ? 'HH:mm' : 'yyyy-MM');
+    if (isDate_(v)) v = Utilities.formatDate(v, TZ, r[0].indexOf('時間') >= 0 ? 'HH:mm' : 'yyyy-MM');
     cfg[r[0]] = v;
   });
   return cfg;
@@ -516,7 +560,7 @@ function readOrders_() {
     return {
       id: String(r[COL['訂單ID']]),
       rowIndex: i + 2,
-      shipDate: d instanceof Date ? fmtDate_(d) : String(d || '').trim(),
+      shipDate: isDate_(d) ? fmtDate_(d) : Core.normalizeDate(d),
       store: String(r[COL['店家']] || '').trim(),
       product: String(r[COL['型號']] || '').trim(),
       qty: r[COL['數量']],
@@ -572,7 +616,7 @@ function readHolidays_() {
   var sh = mustSheet_(SHEET.HOLIDAYS);
   if (sh.getLastRow() < 2) return [];
   return sh.getRange(2, 1, sh.getLastRow() - 1, 1).getValues()
-    .map(function (r) { return r[0] instanceof Date ? fmtDate_(r[0]) : String(r[0]).trim(); }).filter(String);
+    .map(function (r) { return isDate_(r[0]) ? fmtDate_(r[0]) : Core.normalizeDate(r[0]); }).filter(String);
 }
 
 function readBatchIds_() {
@@ -683,6 +727,9 @@ function dropDefaultSheet_(ss) {
   var first = ss.getSheets()[0];
   if (ss.getSheets().length > 1 && /^(Sheet1|工作表1)$/.test(first.getName())) ss.deleteSheet(first);
 }
+
+/** 試算表日期值；不用 instanceof，避免跨環境判斷失敗 */
+function isDate_(v) { return Object.prototype.toString.call(v) === '[object Date]' && !isNaN(v.getTime()); }
 
 function fmtDate_(d) { return Utilities.formatDate(d, TZ, 'yyyy-MM-dd'); }
 

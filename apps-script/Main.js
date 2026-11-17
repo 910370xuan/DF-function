@@ -105,8 +105,9 @@ function runBatch_(type, opts) {
     writeRowMessages_(orders, built.errors);
 
     if (!built.groups.length) {
-      var msg = type + '：今日無待出貨訂單' + (built.errors.length ? '（另有 ' + built.errors.length + ' 筆資料有誤，請看「系統訊息」欄）' : '');
-      if (!opts.manual || built.errors.length) notify_('【出貨】' + today + ' ' + msg, '<p>' + msg + '</p>', []);
+      var msg = type + '：今日無待出貨訂單' + (built.errors.length ? '（另有 ' + built.errors.length + ' 筆資料有誤，請看「系統訊息」欄）' : '') +
+        '\n\n診斷：' + Core.describeDiagnosis(Core.diagnose(orders.rows, today), today);
+      if (!opts.manual || built.errors.length) notify_('【出貨】' + today + ' ' + type + '：今日無待出貨訂單', '<p>' + esc_(msg).replace(/\n/g, '<br>') + '</p>', []);
       return { ok: true, message: msg };
     }
 
@@ -271,7 +272,7 @@ function readConfig_() {
   vals.forEach(function (r) {
     if (!r[0]) return;
     var v = r[1];
-    if (v instanceof Date) v = Utilities.formatDate(v, TZ, r[0].indexOf('時間') >= 0 ? 'HH:mm' : 'yyyy-MM');
+    if (isDate_(v)) v = Utilities.formatDate(v, TZ, r[0].indexOf('時間') >= 0 ? 'HH:mm' : 'yyyy-MM');
     cfg[r[0]] = v;
   });
   return cfg;
@@ -303,7 +304,7 @@ function readOrders_() {
     return {
       id: String(r[COL['訂單ID']]),
       rowIndex: i + 2,
-      shipDate: d instanceof Date ? fmtDate_(d) : String(d || '').trim(),
+      shipDate: isDate_(d) ? fmtDate_(d) : Core.normalizeDate(d),
       store: String(r[COL['店家']] || '').trim(),
       product: String(r[COL['型號']] || '').trim(),
       qty: r[COL['數量']],
@@ -359,7 +360,7 @@ function readHolidays_() {
   var sh = mustSheet_(SHEET.HOLIDAYS);
   if (sh.getLastRow() < 2) return [];
   return sh.getRange(2, 1, sh.getLastRow() - 1, 1).getValues()
-    .map(function (r) { return r[0] instanceof Date ? fmtDate_(r[0]) : String(r[0]).trim(); }).filter(String);
+    .map(function (r) { return isDate_(r[0]) ? fmtDate_(r[0]) : Core.normalizeDate(r[0]); }).filter(String);
 }
 
 function readBatchIds_() {
@@ -470,6 +471,9 @@ function dropDefaultSheet_(ss) {
   var first = ss.getSheets()[0];
   if (ss.getSheets().length > 1 && /^(Sheet1|工作表1)$/.test(first.getName())) ss.deleteSheet(first);
 }
+
+/** 試算表日期值；不用 instanceof，避免跨環境判斷失敗 */
+function isDate_(v) { return Object.prototype.toString.call(v) === '[object Date]' && !isNaN(v.getTime()); }
 
 function fmtDate_(d) { return Utilities.formatDate(d, TZ, 'yyyy-MM-dd'); }
 

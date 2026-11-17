@@ -119,6 +119,46 @@ var Core = (function () {
     return '';
   }
 
+  /**
+   * 文字日期轉成 'YYYY-MM-DD'；接受 2026/11/17、2026-11-17、2026.11.17、民國 115/11/17。
+   * 無法辨識回傳 ''。
+   */
+  function normalizeDate(s) {
+    var m = String(s == null ? '' : s).trim().match(/^(\d{2,4})[\/\-.](\d{1,2})[\/\-.](\d{1,2})$/);
+    if (!m) return '';
+    var y = Number(m[1]);
+    if (m[1].length <= 3) y += 1911;
+    var mo = Number(m[2]), d = Number(m[3]);
+    if (mo < 1 || mo > 12 || d < 1 || d > 31) return '';
+    return y + '-' + pad(mo, 2) + '-' + pad(d, 2);
+  }
+
+  /** 沒有產出任何出貨單時，說明每一列被略過的原因 */
+  function diagnose(rows, today) {
+    var out = { total: 0, byStatus: {}, noDate: 0, future: [], ready: 0 };
+    rows.forEach(function (r) {
+      if (!r.store && !r.product && !r.qty) return;
+      out.total++;
+      var st = r.status || '（空白）';
+      out.byStatus[st] = (out.byStatus[st] || 0) + 1;
+      if (r.status !== '待出貨') return;
+      if (!r.shipDate) out.noDate++;
+      else if (r.shipDate > today) out.future.push(r.shipDate);
+      else out.ready++;
+    });
+    return out;
+  }
+
+  function describeDiagnosis(d, today) {
+    if (!d.total) return '「出貨清單」工作表沒有讀到任何訂單列（請確認是填在「出貨清單」第 2 列以下，且有填店家）。';
+    var parts = ['讀到 ' + d.total + ' 筆訂單列'];
+    var st = Object.keys(d.byStatus).map(function (k) { return k + ' ' + d.byStatus[k] + ' 筆'; }).join('、');
+    parts.push('狀態：' + st);
+    if (d.noDate) parts.push(d.noDate + ' 筆「待出貨」沒有出貨日或日期格式無法辨識');
+    if (d.future.length) parts.push(d.future.length + ' 筆出貨日在今天（' + today + '）之後：' + d.future.slice(0, 5).join('、'));
+    return parts.join('；') + '。';
+  }
+
   /** 貨運單：每張工作表 6 格（2 頁 × 3 格），8 家 → [[6 家], [2 家]] → 3+3+2 頁 */
   function chunkLabels(stores) {
     var out = [];
@@ -202,6 +242,9 @@ var Core = (function () {
     nextBatchId: nextBatchId,
     pendingSignature: pendingSignature,
     findDuplicates: findDuplicates,
+    normalizeDate: normalizeDate,
+    diagnose: diagnose,
+    describeDiagnosis: describeDiagnosis,
     parseRowRange: parseRowRange
   };
 })();
