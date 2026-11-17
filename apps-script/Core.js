@@ -31,7 +31,7 @@ var Core = (function () {
     return { orderNo: formatOrderNo(dateStr, serial), state: { month: month, last: serial } };
   }
 
-  /** 買十送一：同一行、同品項，每 10 個送 1 個，不跨品項、不跨訂單累計 */
+  /** 買十送一：同品項每 10 個送 1 個，不跨品項；同一天出貨的同型號先合併再計算 */
   function giftQty(qty, product, eligible) {
     if (eligible && eligible.length && eligible.indexOf(product) < 0) return 0;
     return Math.floor(Number(qty) / 10);
@@ -71,7 +71,8 @@ var Core = (function () {
     var groups = [];
     order.forEach(function (store) {
       var list = byStore[store];
-      if (list.length > INVOICE_MAX_LINES) {
+      var merged = mergeSameProduct(list);
+      if (merged.length > INVOICE_MAX_LINES) {
         list.forEach(function (r) {
           errors.push({ rowId: r.id, message: '同一家店超過 ' + INVOICE_MAX_LINES + ' 行品項，出貨單放不下，請拆單或人工處理' });
         });
@@ -81,12 +82,29 @@ var Core = (function () {
         store: store,
         duplicateVendor: !!dupVendors[store],
         rowIds: list.map(function (r) { return r.id; }),
-        lines: list.map(function (r) {
-          return { product: r.product, qty: Number(r.qty), note: buildNote(r, opts.eligible) };
+        lines: merged.map(function (m) {
+          return { product: m.product, qty: m.qty, note: buildNote(m, opts.eligible) };
         })
       });
     });
     return { groups: groups, errors: errors };
+  }
+
+  /** 同一天出貨、同一家店的同型號合併成一行，10+1 以合併後數量計算 */
+  function mergeSameProduct(list) {
+    var byProduct = {}, out = [];
+    list.forEach(function (r) {
+      var m = byProduct[r.product];
+      if (!m) {
+        m = byProduct[r.product] = { product: r.product, qty: 0, pin8: 0, notes: [] };
+        out.push(m);
+      }
+      m.qty += Number(r.qty);
+      m.pin8 += Number(r.pin8) || 0;
+      var n = String(r.note || '').trim();
+      if (n && m.notes.indexOf(n) < 0) m.notes.push(n);
+    });
+    return out.map(function (m) { return { product: m.product, qty: m.qty, pin8: m.pin8, note: m.notes.join('/') }; });
   }
 
   function validateRow(r, vendorSet, productSet) {
@@ -177,6 +195,7 @@ var Core = (function () {
     giftQty: giftQty,
     buildNote: buildNote,
     buildGroups: buildGroups,
+    mergeSameProduct: mergeSameProduct,
     chunkLabels: chunkLabels,
     labelPagesFor: labelPagesFor,
     isShippingDay: isShippingDay,

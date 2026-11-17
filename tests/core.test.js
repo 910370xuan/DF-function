@@ -18,7 +18,7 @@ test('單據編號：同月遞增、跨月與跨年歸零', () => {
   assert.deepStrictEqual(r.state, { month: '2027-01', last: 1 });
 });
 
-test('10+1：每 10 送 1，只看同一行', () => {
+test('10+1：每 10 送 1，不跨品項', () => {
   const el = ['GPB-2000', 'DCB-6000'];
   assert.strictEqual(Core.buildNote({ product: 'GPB-2000', qty: 10 }, el), '10+1');
   assert.strictEqual(Core.buildNote({ product: 'GPB-2000', qty: 25 }, el), '25+2');
@@ -67,11 +67,39 @@ test('分組：資料有誤不得默默填入', () => {
   assert.deepStrictEqual(errors.map(e => e.rowId), ['a', 'b', 'c', 'd']);
 });
 
-test('分組：超過 7 行整張退回', () => {
-  const rows = Array.from({ length: 8 }, (_, i) => ({
-    id: 'r' + i, shipDate: '2026-11-17', store: '格錸車業', product: 'GPB-2000', qty: 1, status: '待出貨'
-  }));
+test('同一天出貨：同店同型號合併後計算 10+1', () => {
+  const rows = [
+    { id: 'a', shipDate: '2026-11-16', store: '格錸車業', product: 'GPB-2000', qty: 6, status: '待出貨' },
+    { id: 'b', shipDate: '2026-11-17', store: '格錸車業', product: 'DCB-6000', qty: 7, pin8: 1, status: '待出貨' },
+    { id: 'c', shipDate: '2026-11-17', store: '格錸車業', product: 'GPB-2000', qty: 4, note: '不需工具', status: '待出貨' },
+    { id: 'd', shipDate: '2026-11-17', store: '格錸車業', product: 'DCB-6000', qty: 3, pin8: 1, status: '待出貨' },
+    { id: 'e', shipDate: '2026-11-17', store: '麥斯二輪', product: 'GPB-2000', qty: 4, status: '待出貨' }
+  ];
   const { groups, errors } = Core.buildGroups(rows, opts);
+  assert.deepStrictEqual(errors, []);
+  assert.deepStrictEqual(groups[0].rowIds, ['a', 'b', 'c', 'd']);
+  assert.deepStrictEqual(groups[0].lines, [
+    { product: 'GPB-2000', qty: 10, note: '10+1/不需工具' },
+    { product: 'DCB-6000', qty: 10, note: '10+1/8P*2' }
+  ]);
+  assert.deepStrictEqual(groups[1].lines, [{ product: 'GPB-2000', qty: 4, note: '' }]);
+});
+
+test('分組：合併後仍超過 7 行才退回', () => {
+  const same = Array.from({ length: 8 }, (_, i) => ({
+    id: 's' + i, shipDate: '2026-11-17', store: '麥斯二輪', product: 'GPB-2000', qty: 1, status: '待出貨'
+  }));
+  const r = Core.buildGroups(same, opts);
+  assert.strictEqual(r.errors.length, 0);
+  assert.deepStrictEqual(r.groups[0].lines, [{ product: 'GPB-2000', qty: 8, note: '' }]);
+});
+
+test('分組：超過 7 行整張退回', () => {
+  const products = ['P1', 'P2', 'P3', 'P4', 'P5', 'P6', 'P7', 'P8'];
+  const rows = products.map((p, i) => ({
+    id: 'r' + i, shipDate: '2026-11-17', store: '格錸車業', product: p, qty: 1, status: '待出貨'
+  }));
+  const { groups, errors } = Core.buildGroups(rows, { ...opts, products });
   assert.strictEqual(groups.length, 0);
   assert.strictEqual(errors.length, 8);
 });
