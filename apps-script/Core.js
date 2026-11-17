@@ -82,12 +82,31 @@ var Core = (function () {
         store: store,
         duplicateVendor: !!dupVendors[store],
         rowIds: list.map(function (r) { return r.id; }),
+        discount: sumAmount(list, 'discount'),
+        paid: sumAmount(list, 'paid'),
         lines: merged.map(function (m) {
           return { product: m.product, qty: m.qty, note: buildNote(m, opts.eligible) };
         })
       });
     });
     return { groups: groups, errors: errors };
+  }
+
+  /** 金額欄可空白；有填就必須是 0 以上的數字（可含千分位逗號） */
+  function toAmount(v) {
+    if (v === '' || v == null) return 0;
+    var n = Number(String(v).replace(/[,，\s]/g, ''));
+    return n;
+  }
+
+  function isAmount(v) {
+    var n = toAmount(v);
+    return !isNaN(n) && n >= 0;
+  }
+
+  /** 同一家店同一批的折讓／已收金額加總（填在任一列皆可） */
+  function sumAmount(list, key) {
+    return list.reduce(function (acc, r) { return acc + toAmount(r[key]); }, 0);
   }
 
   /** 同一天出貨、同一家店的同型號合併成一行，10+1 以合併後數量計算 */
@@ -116,6 +135,8 @@ var Core = (function () {
     if (!(q > 0) || Math.floor(q) !== q) return '數量必須是正整數';
     var p8 = Number(r.pin8) || 0;
     if (p8 < 0 || p8 > q || Math.floor(p8) !== p8) return '8pin 數量不正確';
+    if (!isAmount(r.discount)) return '折讓金額必須是 0 以上的數字';
+    if (!isAmount(r.paid)) return '已收金額必須是 0 以上的數字';
     return '';
   }
 

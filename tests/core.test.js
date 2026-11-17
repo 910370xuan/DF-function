@@ -151,3 +151,16 @@ test('診斷：說明為何沒有產單', () => {
   assert.match(text, /已產單 1 筆/);
   assert.match(Core.describeDiagnosis(Core.diagnose([], 'x'), 'x'), /沒有讀到任何訂單列/);
 });
+
+test('折讓／已收金額：同店加總、格式錯誤退回', () => {
+  const rows = [
+    { id: 'a', shipDate: '2026-11-17', store: '格錸車業', product: 'GPB-2000', qty: 10, discount: '1,000', status: '待出貨' },
+    { id: 'b', shipDate: '2026-11-17', store: '格錸車業', product: 'DCB-6000', qty: 2, discount: 200, paid: 7200, status: '待出貨' },
+    { id: 'c', shipDate: '2026-11-17', store: '麥斯二輪', product: 'GPB-2000', qty: 1, status: '待出貨' },
+    { id: 'd', shipDate: '2026-11-17', store: '微霖科技有限公司', product: 'GPB-2000', qty: 1, paid: '五百', status: '待出貨' },
+    { id: 'e', shipDate: '2026-11-17', store: '微霖科技有限公司', product: 'GPB-2000', qty: 1, discount: -5, status: '待出貨' }
+  ];
+  const { groups, errors } = Core.buildGroups(rows, opts);
+  assert.deepStrictEqual(groups.map(g => [g.store, g.discount, g.paid]), [['格錸車業', 1200, 7200], ['麥斯二輪', 0, 0]]);
+  assert.deepStrictEqual(errors.map(e => e.rowId), ['d', 'e']);
+});

@@ -84,12 +84,31 @@ var Core = (function () {
         store: store,
         duplicateVendor: !!dupVendors[store],
         rowIds: list.map(function (r) { return r.id; }),
+        discount: sumAmount(list, 'discount'),
+        paid: sumAmount(list, 'paid'),
         lines: merged.map(function (m) {
           return { product: m.product, qty: m.qty, note: buildNote(m, opts.eligible) };
         })
       });
     });
     return { groups: groups, errors: errors };
+  }
+
+  /** 金額欄可空白；有填就必須是 0 以上的數字（可含千分位逗號） */
+  function toAmount(v) {
+    if (v === '' || v == null) return 0;
+    var n = Number(String(v).replace(/[,，\s]/g, ''));
+    return n;
+  }
+
+  function isAmount(v) {
+    var n = toAmount(v);
+    return !isNaN(n) && n >= 0;
+  }
+
+  /** 同一家店同一批的折讓／已收金額加總（填在任一列皆可） */
+  function sumAmount(list, key) {
+    return list.reduce(function (acc, r) { return acc + toAmount(r[key]); }, 0);
   }
 
   /** 同一天出貨、同一家店的同型號合併成一行，10+1 以合併後數量計算 */
@@ -118,6 +137,8 @@ var Core = (function () {
     if (!(q > 0) || Math.floor(q) !== q) return '數量必須是正整數';
     var p8 = Number(r.pin8) || 0;
     if (p8 < 0 || p8 > q || Math.floor(p8) !== p8) return '8pin 數量不正確';
+    if (!isAmount(r.discount)) return '折讓金額必須是 0 以上的數字';
+    if (!isAmount(r.paid)) return '已收金額必須是 0 以上的數字';
     return '';
   }
 
@@ -269,7 +290,7 @@ var SHEET = {
   VENDORS: '廠商清冊'
 };
 
-var ORDER_HEADERS = ['訂單ID', '收單時間', '出貨日', '店家', '型號', '數量', '8pin數', '附註', '狀態', '批次', '單據編號', '來源', '系統訊息'];
+var ORDER_HEADERS = ['訂單ID', '收單時間', '出貨日', '店家', '型號', '數量', '8pin數', '附註', '狀態', '批次', '單據編號', '來源', '系統訊息', '折讓金額', '已收金額'];
 var COL = {}; ORDER_HEADERS.forEach(function (h, i) { COL[h] = i; });
 var STATUSES = ['待出貨', '已產單', '已手打', '暫緩', '取消', '已出貨'];
 var BATCH_HEADERS = ['批次ID', '產生時間', '類型', '店家數', '單據編號', '出貨單PDF', '貨運單PDF', '出貨單Excel', '執行者'];
@@ -429,6 +450,8 @@ function buildInvoices_(ss, groups, today, cfg, tmpSheets) {
       var c = tmp.getRange(a);
       if (!c.getFormula()) c.clearContent(); // 清掉上一張單留下的手動輸入（例如折讓金額）
     });
+    if (g.discount > 0) tmp.getRange('B17').setValue(g.discount);
+    if (g.paid > 0) tmp.getRange('E17').setValue(g.paid);
     var cd = [], h = [];
     for (var k = 0; k < Core.INVOICE_MAX_LINES; k++) {
       var line = g.lines[k];
@@ -576,6 +599,8 @@ function readOrders_() {
       qty: r[COL['數量']],
       pin8: r[COL['8pin數']],
       note: String(r[COL['附註']] || '').trim(),
+      discount: r[COL['折讓金額']],
+      paid: r[COL['已收金額']],
       status: String(r[COL['狀態']] || '').trim()
     };
   });
@@ -672,6 +697,15 @@ function setup() {
   });
 
   var orders = ensureSheet_(SHEET.ORDERS, ORDER_HEADERS);
+  // 舊版工作表補上新增的欄位標題（只加在最後，不移動既有資料）
+  var have = orders.getRange(1, 1, 1, Math.max(orders.getLastColumn(), 1)).getValues()[0];
+  ORDER_HEADERS.forEach(function (h, i) {
+    if (have[i] !== h) {
+      if (have[i]) throw new Error('「出貨清單」第 ' + (i + 1) + ' 欄標題應為「' + h + '」，目前是「' + have[i] + '」，請勿移動欄位順序');
+      orders.getRange(1, i + 1).setValue(h).setFontWeight('bold');
+    }
+  });
+  orders.getRange(2, COL['折讓金額'] + 1, orders.getMaxRows() - 1, 2).setNumberFormat('#,##0');
   var maxR = orders.getMaxRows() - 1;
   orders.getRange(2, COL['出貨日'] + 1, maxR, 1).setNumberFormat('yyyy-mm-dd')
     .setDataValidation(SpreadsheetApp.newDataValidation().requireDate().setAllowInvalid(false).build());
@@ -712,6 +746,7 @@ function groupsTable_(groups) {
     groups.map(function (g) {
       return '<tr><td>' + (g.orderNo || '（未編號）') + '</td><td>' + esc_(g.store) + '</td><td>' +
         g.lines.map(function (l) { return esc_(l.product + ' × ' + l.qty + (l.note ? '（' + l.note + '）' : '')); }).join('<br>') +
+        (g.discount ? '<br>折讓 ' + g.discount : '') + (g.paid ? '<br>已收 ' + g.paid : '') +
         '</td></tr>';
     }).join('') + '</table>';
 }
