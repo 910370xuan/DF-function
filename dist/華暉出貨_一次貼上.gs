@@ -287,13 +287,14 @@ var CONFIG_DEFAULTS = [
   ['當日截止時間', '16:00', '截止後不再詢問補單'],
   ['週六出貨', false, ''],
   ['10+1適用型號', 'GPB-2000,GPB-2000A,GPB-2000S,DCB-6000', '逗號分隔；空白代表所有型號'],
-  ['出貨單第一聯列', '1-35', ''],
-  ['出貨單第二聯列', '36-70', ''],
-  ['貨運單第一頁列', '1-41', ''],
+  ['出貨單列印列', '1-57', '第一聯＋第二聯印在同一頁（對應原本第 57 列的分頁符號）'],
+  ['出貨單列印欄數', 9, 'A～I 欄'],
+  ['出貨單清空欄位', 'B17,E17', '模板上手動輸入的欄位（折讓金額、已收金額），產單前清空；是公式則不動'],
+  ['貨運單第一頁列', '1-41', '對應原本第 41 列的分頁符號'],
   ['貨運單第二頁列', '42-84', ''],
-  ['列印欄數', 9, 'A～I 欄'],
-  ['出貨單PDF參數', 'size=A4&portrait=true&scale=4&top_margin=0.3&bottom_margin=0.3&left_margin=0.3&right_margin=0.3&horizontal_alignment=CENTER', 'scale：1=100%、2=符合寬度、3=符合高度、4=符合頁面'],
-  ['貨運單PDF參數', 'size=A4&portrait=true&scale=4&top_margin=0.3&bottom_margin=0.3&left_margin=0.3&right_margin=0.3&horizontal_alignment=CENTER', '依實體貼紙校準'],
+  ['貨運單列印欄數', 10, 'A～J 欄；貼紙偏大就改 11，偏小就改 9'],
+  ['出貨單列印設定', 'size=A4&portrait=true&scale=4&top_margin=0.75&bottom_margin=0.75&left_margin=0.7&right_margin=0.7&horizontal_alignment=LEFT&vertical_alignment=TOP', 'scale：1=100%、2=符合寬度、3=符合高度、4=符合頁面；邊界單位英吋（標準＝上下 0.75、左右 0.7）'],
+  ['貨運單列印設定', 'size=A4&portrait=true&scale=4&top_margin=0.75&bottom_margin=0.75&left_margin=0.7&right_margin=0.7&horizontal_alignment=LEFT&vertical_alignment=TOP', '依實體貼紙校準'],
   [SUPPLEMENT_KEY, false, '勾選後立即產生補單（手機也可以）']
 ];
 
@@ -379,8 +380,8 @@ function runBatch_(type, opts) {
     var lblSS = buildLabels_(ss, built.groups.map(function (g) { return g.store; }), cfg, tmpSheets);
 
     var name = batchId + '_' + type;
-    var invPdf = folder.createFile(exportBlob_(invSS.getId(), 'pdf', cfg['出貨單PDF參數']).setName('出貨單_' + name + '.pdf'));
-    var lblPdf = folder.createFile(exportBlob_(lblSS.getId(), 'pdf', cfg['貨運單PDF參數']).setName('貨運單_' + name + '.pdf'));
+    var invPdf = folder.createFile(exportBlob_(invSS.getId(), 'pdf', cfg['出貨單列印設定']).setName('出貨單_' + name + '.pdf'));
+    var lblPdf = folder.createFile(exportBlob_(lblSS.getId(), 'pdf', cfg['貨運單列印設定']).setName('貨運單_' + name + '.pdf'));
     var invXlsx = folder.createFile(exportBlob_(invSS.getId(), 'xlsx', '').setName('出貨單_' + name + '.xlsx'));
     DriveApp.getFileById(invSS.getId()).moveTo(folder);
     DriveApp.getFileById(lblSS.getId()).moveTo(folder);
@@ -408,12 +409,14 @@ function runBatch_(type, opts) {
   }
 }
 
-/** 每家店：複製模板 → 填值 → 跨表公式轉成值 → 第一聯、第二聯各一張工作表 */
+/** 每家店：複製模板 → 填值 → 跨表公式轉成值 → 一張工作表（第一聯＋第二聯同一頁） */
 function buildInvoices_(ss, groups, today, cfg, tmpSheets) {
   var tpl = mustSheet_(SHEET.INVOICE);
   var out = SpreadsheetApp.create('出貨單_' + today + '_' + Date.now());
-  var pages = [Core.parseRowRange(cfg['出貨單第一聯列']), Core.parseRowRange(cfg['出貨單第二聯列'])];
-  var lastRow = Math.max(pages[0].end, pages[1].end);
+  var page = Core.parseRowRange(cfg['出貨單列印列']);
+  var lastCol = Number(cfg['出貨單列印欄數']) || 9;
+  var lastRow = Math.max(page.end, 70);
+  var clearCells = splitList_(cfg['出貨單清空欄位']);
   var dateText = today.replace(/-/g, '/'); // 以文字寫入，由試算表依自身時區解析成日期，不受腳本時區影響
 
   groups.forEach(function (g, i) {
@@ -422,6 +425,10 @@ function buildInvoices_(ss, groups, today, cfg, tmpSheets) {
     tmp.getRange('L3').setValue(dateText);
     tmp.getRange('M3').setValue(g.store);
     tmp.getRange('H5').setValue(g.orderNo);
+    clearCells.forEach(function (a) {
+      var c = tmp.getRange(a);
+      if (!c.getFormula()) c.clearContent(); // 清掉上一張單留下的手動輸入（例如折讓金額）
+    });
     var cd = [], h = [];
     for (var k = 0; k < Core.INVOICE_MAX_LINES; k++) {
       var line = g.lines[k];
@@ -433,10 +440,8 @@ function buildInvoices_(ss, groups, today, cfg, tmpSheets) {
     SpreadsheetApp.flush();
     freezeCrossSheet_(tmp, lastRow, tmp.getLastColumn()); // 含 N3 價格組合
 
-    pages.forEach(function (p, pi) {
-      var s = tmp.copyTo(out).setName((i + 1) + '_' + g.store + (pi ? '_第二聯' : '_第一聯'));
-      showOnly_(s, p, Number(cfg['列印欄數']));
-    });
+    var s = tmp.copyTo(out).setName((i + 1) + '_' + g.store);
+    showOnly_(s, page, lastCol);
   });
   dropDefaultSheet_(out);
   return out;
@@ -448,6 +453,7 @@ function buildLabels_(ss, stores, cfg, tmpSheets) {
   var out = SpreadsheetApp.create('貨運單_' + Date.now());
   var pages = [Core.parseRowRange(cfg['貨運單第一頁列']), Core.parseRowRange(cfg['貨運單第二頁列'])];
   var lastRow = Math.max(pages[0].end, pages[1].end);
+  var lastCol = Number(cfg['貨運單列印欄數']) || 10;
 
   Core.chunkLabels(stores).forEach(function (chunk, ci) {
     var tmp = tpl.copyTo(ss).setName('_tmp_lbl_' + ci + '_' + Date.now());
@@ -459,7 +465,7 @@ function buildLabels_(ss, stores, cfg, tmpSheets) {
     freezeCrossSheet_(tmp, lastRow, tmp.getLastColumn());
     for (var p = 0; p < Core.labelPagesFor(chunk.length); p++) {
       var s = tmp.copyTo(out).setName('標籤_' + (ci * 2 + p + 1));
-      showOnly_(s, pages[p], Number(cfg['列印欄數']));
+      showOnly_(s, pages[p], lastCol);
     }
   });
   dropDefaultSheet_(out);
@@ -480,8 +486,12 @@ function freezeCrossSheet_(sheet, lastRow, lastCol) {
   SpreadsheetApp.flush();
 }
 
-/** 列印時只顯示指定列與 A～I 欄（隱藏的列欄不會出現在 PDF） */
+/** 列印時只顯示指定列與欄（隱藏的列欄不會出現在 PDF）；列印範圍外的浮動圖片移除 */
 function showOnly_(sheet, page, lastCol) {
+  sheet.getImages().forEach(function (img) {
+    var a = img.getAnchorCell();
+    if (a.getColumn() > lastCol || a.getRow() < page.start || a.getRow() > page.end) img.remove();
+  });
   var maxR = sheet.getMaxRows(), maxC = sheet.getMaxColumns();
   if (maxC > lastCol) sheet.hideColumns(lastCol + 1, maxC - lastCol);
   if (page.start > 1) sheet.hideRows(1, page.start - 1);
@@ -649,6 +659,10 @@ function setup() {
   });
 
   var cfg = ensureSheet_(SHEET.CONFIG, ['項目', '值', '說明']);
+  var obsolete = ['出貨單第一聯列', '出貨單第二聯列', '列印欄數', '出貨單PDF參數', '貨運單PDF參數'];
+  for (var ri = cfg.getLastRow(); ri >= 2; ri--) {
+    if (obsolete.indexOf(cfg.getRange(ri, 1).getValue()) >= 0) cfg.deleteRow(ri);
+  }
   var existing = cfg.getLastRow() > 1 ? cfg.getRange(2, 1, cfg.getLastRow() - 1, 1).getValues().map(function (r) { return r[0]; }) : [];
   CONFIG_DEFAULTS.forEach(function (d) { if (existing.indexOf(d[0]) < 0) cfg.appendRow(d); });
   var keys = cfg.getRange(1, 1, cfg.getLastRow(), 1).getValues();
