@@ -157,12 +157,12 @@ function buildInvoices_(ss, groups, today, cfg, tmpSheets) {
   var out = SpreadsheetApp.create('出貨單_' + today + '_' + Date.now());
   var pages = [Core.parseRowRange(cfg['出貨單第一聯列']), Core.parseRowRange(cfg['出貨單第二聯列'])];
   var lastRow = Math.max(pages[0].end, pages[1].end);
-  var dateObj = parseLocalDate_(today);
+  var dateText = today.replace(/-/g, '/'); // 以文字寫入，由試算表依自身時區解析成日期，不受腳本時區影響
 
   groups.forEach(function (g, i) {
     var tmp = tpl.copyTo(ss).setName('_tmp_inv_' + i + '_' + Date.now());
     tmpSheets.push(tmp);
-    tmp.getRange('L3').setValue(dateObj);
+    tmp.getRange('L3').setValue(dateText);
     tmp.getRange('M3').setValue(g.store);
     tmp.getRange('H5').setValue(g.orderNo);
     var cd = [], h = [];
@@ -472,11 +472,6 @@ function dropDefaultSheet_(ss) {
 }
 
 function fmtDate_(d) { return Utilities.formatDate(d, TZ, 'yyyy-MM-dd'); }
-
-function parseLocalDate_(s) {
-  var p = s.split('-').map(Number);
-  return new Date(p[0], p[1] - 1, p[2]);
-}
 
 function splitList_(s) { return String(s || '').split(/[,，]/).map(function (x) { return x.trim(); }).filter(String); }
 function truthy_(v) { return v === true || String(v).toUpperCase() === 'TRUE'; }

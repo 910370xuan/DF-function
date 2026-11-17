@@ -3,6 +3,7 @@
   "private": true,
   "description": "華暉 LINE 訂單自動化",
   "scripts": {
-    "test": "node --test tests/core.test.js"
+    "test": "node --test tests/core.test.js",
+    "bundle": "node scripts/bundle.js"
   }
 }
