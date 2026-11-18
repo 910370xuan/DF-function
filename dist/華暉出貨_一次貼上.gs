@@ -503,9 +503,11 @@ var CONFIG_DEFAULTS = [
   ['出貨單清空欄位', 'B17,E17', '模板上手動輸入的欄位（折讓金額、已收金額），產單前清空；是公式則不動'],
   ['貨運單第一頁列', '1-41', '對應原本第 41 列的分頁符號'],
   ['貨運單第二頁列', '42-84', ''],
-  ['貨運單列印欄數', 10, 'A～J 欄；貼紙偏大就改 11，偏小就改 9'],
-  ['出貨單列印設定', 'size=A4&portrait=true&scale=4&top_margin=0.75&bottom_margin=0.75&left_margin=0.7&right_margin=0.7&horizontal_alignment=LEFT&vertical_alignment=TOP', 'scale：1=100%、2=符合寬度、3=符合高度、4=符合頁面；邊界單位英吋（標準＝上下 0.75、左右 0.7）'],
-  ['貨運單列印設定', 'size=A4&portrait=true&scale=4&top_margin=0.75&bottom_margin=0.75&left_margin=0.7&right_margin=0.7&horizontal_alignment=LEFT&vertical_alignment=TOP', '依實體貼紙校準'],
+  ['貨運單列印欄數', 9, 'A～I 欄'],
+  ['出貨單縮放比例', 68, '%；與 Google 試算表列印的「依分頁符號自動調整（68%）」相同'],
+  ['貨運單縮放比例', 68, '%；貼紙對不準時微調，例如 67 或 69'],
+  ['列印上下邊界', 0.75, '英吋；Google「標準」邊界＝上下 0.75'],
+  ['列印左邊界', 0.7, '英吋；Google「標準」邊界＝左右 0.7；貼紙整體偏左就加大、偏右就減小'],
   [SUPPLEMENT_KEY, false, '勾選後立即產生補單（手機也可以）']
 ];
 
@@ -592,8 +594,10 @@ function runBatch_(type, opts) {
     var lblSS = buildLabels_(ss, built.groups.map(function (g) { return g.store; }), cfg, tmpSheets);
 
     var name = batchId + '_' + type;
-    var invPdf = folder.createFile(exportBlob_(invSS.getId(), 'pdf', cfg['出貨單列印設定']).setName('出貨單_' + name + '.pdf'));
-    var lblPdf = folder.createFile(exportBlob_(lblSS.getId(), 'pdf', cfg['貨運單列印設定']).setName('貨運單_' + name + '.pdf'));
+    var invParams = printParams_(mustSheet_(SHEET.INVOICE), Number(cfg['出貨單列印欄數']) || 9, cfg['出貨單縮放比例'], cfg);
+    var lblParams = printParams_(mustSheet_(SHEET.LABEL), Number(cfg['貨運單列印欄數']) || 9, cfg['貨運單縮放比例'], cfg);
+    var invPdf = folder.createFile(exportBlob_(invSS.getId(), 'pdf', invParams).setName('出貨單_' + name + '.pdf'));
+    var lblPdf = folder.createFile(exportBlob_(lblSS.getId(), 'pdf', lblParams).setName('貨運單_' + name + '.pdf'));
     var invXlsx = folder.createFile(exportBlob_(invSS.getId(), 'xlsx', '').setName('出貨單_' + name + '.xlsx'));
     DriveApp.getFileById(invSS.getId()).moveTo(folder);
     DriveApp.getFileById(lblSS.getId()).moveTo(folder);
@@ -667,7 +671,7 @@ function buildLabels_(ss, stores, cfg, tmpSheets) {
   var out = SpreadsheetApp.create('貨運單_' + Date.now());
   var pages = [Core.parseRowRange(cfg['貨運單第一頁列']), Core.parseRowRange(cfg['貨運單第二頁列'])];
   var lastRow = Math.max(pages[0].end, pages[1].end);
-  var lastCol = Number(cfg['貨運單列印欄數']) || 10;
+  var lastCol = Number(cfg['貨運單列印欄數']) || 9;
 
   Core.chunkLabels(stores).forEach(function (chunk, ci) {
     var tmp = tpl.copyTo(ss).setName('_tmp_lbl_' + ci + '_' + Date.now());
@@ -710,6 +714,24 @@ function showOnly_(sheet, page, lastCol) {
   if (maxC > lastCol) sheet.hideColumns(lastCol + 1, maxC - lastCol);
   if (page.start > 1) sheet.hideRows(1, page.start - 1);
   if (maxR > page.end) sheet.hideRows(page.end + 1, maxR - page.end);
+}
+
+/**
+ * 固定縮放比例：PDF 匯出只能「符合寬度」，所以用欄寬算出右邊界，
+ * 讓 A～I 欄縮放後剛好等於指定比例（A4 寬 8.27 英吋，96 像素＝1 英吋）。
+ */
+function printParams_(tplSheet, lastCol, pct, cfg) {
+  var px = 0;
+  for (var c = 1; c <= lastCol; c++) px += tplSheet.getColumnWidth(c);
+  var scale = (Number(pct) || 68) / 100;
+  var tb = Number(cfg['列印上下邊界']);
+  if (isNaN(tb)) tb = 0.75;
+  var left = Number(cfg['列印左邊界']);
+  if (isNaN(left)) left = 0.7;
+  var right = 8.27 - left - px * scale / 96;
+  if (right < 0) throw new Error('縮放 ' + pct + '% 時內容比紙寬，請調小縮放比例或左邊界');
+  return 'size=A4&portrait=true&scale=2&top_margin=' + tb + '&bottom_margin=' + tb +
+    '&left_margin=' + left + '&right_margin=' + right.toFixed(3) + '&horizontal_alignment=LEFT&vertical_alignment=TOP';
 }
 
 function exportBlob_(ssId, format, params) {
@@ -933,7 +955,11 @@ function setup() {
   });
 
   var cfg = ensureSheet_(SHEET.CONFIG, ['項目', '值', '說明']);
-  var obsolete = ['出貨單第一聯列', '出貨單第二聯列', '列印欄數', '出貨單PDF參數', '貨運單PDF參數'];
+  var obsolete = ['出貨單第一聯列', '出貨單第二聯列', '列印欄數', '出貨單PDF參數', '貨運單PDF參數', '出貨單列印設定', '貨運單列印設定'];
+  // 舊版預設的貨運單欄數 10 改為 9（A～I）
+  for (var rj = 2; rj <= cfg.getLastRow(); rj++) {
+    if (cfg.getRange(rj, 1).getValue() === '貨運單列印欄數' && Number(cfg.getRange(rj, 2).getValue()) === 10) cfg.getRange(rj, 2, 1, 2).setValues([[9, 'A～I 欄']]);
+  }
   for (var ri = cfg.getLastRow(); ri >= 2; ri--) {
     if (obsolete.indexOf(cfg.getRange(ri, 1).getValue()) >= 0) cfg.deleteRow(ri);
   }
