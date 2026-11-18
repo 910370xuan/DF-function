@@ -43,6 +43,7 @@ var CONFIG_DEFAULTS = [
   ['貨運單列印欄數', 9, 'A～I 欄'],
   ['出貨單縮放比例', 68, '%；與 Google 試算表列印的「依分頁符號自動調整（68%）」相同'],
   ['貨運單縮放比例', 68, '%；貼紙對不準時微調，例如 67 或 69'],
+  ['PDF字型', '', '空白＝與原試算表相同；如果 PDF 的中文字型還是不對，可填 Noto Sans TC 強制指定'],
   ['列印上下邊界', 0.75, '英吋；Google「標準」邊界＝上下 0.75'],
   ['列印左邊界', 0.7, '英吋；Google「標準」邊界＝左右 0.7；貼紙整體偏左就加大、偏右就減小'],
   [SUPPLEMENT_KEY, false, '勾選後立即產生補單（手機也可以）']
@@ -261,6 +262,8 @@ function freezeCrossSheet_(sheet, lastRow, lastCol) {
 
 /** 列印時只顯示指定列與欄（隱藏的列欄不會出現在 PDF）；列印範圍外的浮動圖片移除 */
 function showOnly_(sheet, page, lastCol) {
+  var font = String(readConfig_()['PDF字型'] || '').trim();
+  if (font) sheet.getRange(page.start, 1, page.end - page.start + 1, lastCol).setFontFamily(font);
   sheet.getImages().forEach(function (img) {
     var a = img.getAnchorCell();
     if (a.getColumn() > lastCol || a.getRow() < page.start || a.getRow() > page.end) img.remove();
