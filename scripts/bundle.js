@@ -6,6 +6,7 @@ const read = f => fs.readFileSync(path.join(root, 'apps-script', f), 'utf8');
 const out = [
   '/* 華暉出貨自動化：請整份貼進 Apps Script 的 Code.gs（取代原本內容）。由 scripts/bundle.js 產生，請勿手改。 */',
   read('Core.js'),
+  read('Parser.js'),
   read('Main.js')
 ].join('\n\n');
 fs.mkdirSync(path.join(root, 'dist'), { recursive: true });

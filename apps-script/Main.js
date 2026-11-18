@@ -10,8 +10,12 @@ var SHEET = {
   HOLIDAYS: '假日',
   INVOICE: '出貨單',
   LABEL: '貨運單',
-  VENDORS: '廠商清冊'
+  VENDORS: '廠商清冊',
+  ALIASES: '型號對照',
+  PARSE_TEST: '解析測試'
 };
+var ALIAS_HEADERS = ['客戶說法', '型號', 'pin（4 或 8，可空白）'];
+var PARSE_HEADERS = ['訊息（貼上客戶訊息）', '店家（可空白）', '有圖片', '判斷', '品項', '備註', '需確認原因', '上一筆訂單建議'];
 
 var ORDER_HEADERS = ['訂單ID', '收單時間', '出貨日', '店家', '型號', '數量', '8pin數', '附註', '狀態', '批次', '單據編號', '來源', '系統訊息', '折讓金額', '已收金額'];
 var COL = {}; ORDER_HEADERS.forEach(function (h, i) { COL[h] = i; });
@@ -49,6 +53,7 @@ function onOpen() {
     .addItem('產生今日主批次', 'menuMainBatch')
     .addItem('產生補單', 'menuSupplement')
     .addSeparator()
+    .addItem('解析測試（貼訊息試辨識）', 'runParseTest')
     .addItem('同步廠商清冊', 'syncVendors')
     .addItem('初始化／修復工作表與排程', 'setup')
     .addToUi();
@@ -397,6 +402,64 @@ function syncVendors() {
   dst.getRange(1, 1, values.length, values[0].length).setValues(values);
 }
 
+/* ───────────── 訊息解析（第二階段的規則層，先提供測試用） ───────────── */
+
+function readAliases_() {
+  var sh = SpreadsheetApp.getActive().getSheetByName(SHEET.ALIASES);
+  if (!sh || sh.getLastRow() < 2) return Parser.DEFAULT_ALIASES;
+  return sh.getRange(2, 1, sh.getLastRow() - 1, 3).getValues()
+    .filter(function (r) { return String(r[0]).trim() && String(r[1]).trim(); })
+    .map(function (r) { return { alias: String(r[0]).trim(), product: String(r[1]).trim(), pin: Number(r[2]) || 0 }; });
+}
+
+/** 歷史訂單：出貨清單 ＋（有設定主檔時）主檔「庫存管理」的出庫紀錄 */
+function readHistory_() {
+  var hist = readOrders_().rows
+    .filter(function (r) { return r.store && r.product; })
+    .map(function (r) { return { store: r.store, product: r.product, qty: r.qty, date: r.shipDate }; });
+  var id = readConfig_()['主檔試算表ID'];
+  if (id) {
+    var sh = SpreadsheetApp.openById(id).getSheetByName('庫存管理');
+    if (sh && sh.getLastRow() > 2) {
+      // A 日期、C 出庫、D 商品名稱、E 數量、G 出貨渠道、H 客戶名稱
+      sh.getRange(3, 1, sh.getLastRow() - 2, 8).getValues().forEach(function (r) {
+        if (r[2] !== '出庫' || !r[7] || !r[3] || r[6] === '特贈') return;
+        hist.push({ store: String(r[7]).trim(), product: String(r[3]).trim(), qty: r[4], date: isDate_(r[0]) ? fmtDate_(r[0]) : Core.normalizeDate(r[0]) });
+      });
+    }
+  }
+  return hist;
+}
+
+function runParseTest() {
+  var sh = ensureSheet_(SHEET.PARSE_TEST, PARSE_HEADERS);
+  var n = sh.getLastRow() - 1;
+  if (n < 1) { showResult_({ message: '請在「解析測試」A 欄貼上客戶訊息（一格一段對話），再執行一次' }); return; }
+  var aliases = readAliases_(), today = fmtDate_(new Date());
+  var history = null;
+  var kindText = { order: '✅ 明確訂單', unclear: '⚠ 待確認', not_order: '— 不是訂單' };
+  var input = sh.getRange(2, 1, n, 3).getValues();
+  var out = input.map(function (r) {
+    if (!String(r[0]).trim()) return ['', '', '', '', ''];
+    var res = Parser.parse(r[0], { aliases: aliases, hasImage: r[2] === true, today: today });
+    var sug = '';
+    if (res.vague && String(r[1]).trim()) {
+      history = history || readHistory_();
+      var h = Parser.suggestFromHistory(String(r[1]).trim(), history);
+      sug = h ? h.product + ' × ' + h.qty + '（' + h.date + '）' : '查無這家店的歷史訂單';
+    }
+    return [
+      kindText[res.kind],
+      res.items.map(function (it) { return it.product + ' × ' + it.qty + (it.pin8 ? '（8pin ' + it.pin8 + '）' : ''); }).join('\n'),
+      res.notes.join('、'),
+      res.reasons.join('\n'),
+      sug
+    ];
+  });
+  sh.getRange(2, 4, n, 5).setValues(out);
+  showResult_({ message: '解析完成：' + out.filter(function (o) { return o[0]; }).length + ' 筆' });
+}
+
 /* ───────────── 初始化 ───────────── */
 
 function setup() {
@@ -441,6 +504,13 @@ function setup() {
   orders.setFrozenRows(1);
 
   ensureSheet_(SHEET.BATCHES, BATCH_HEADERS);
+  var al = ensureSheet_(SHEET.ALIASES, ALIAS_HEADERS);
+  if (al.getLastRow() < 2) {
+    al.getRange(2, 1, Parser.DEFAULT_ALIASES.length, 3).setValues(Parser.DEFAULT_ALIASES.map(function (a) { return [a.alias, a.product, a.pin || '']; }));
+  }
+  var pt = ensureSheet_(SHEET.PARSE_TEST, PARSE_HEADERS);
+  pt.getRange(2, 3, pt.getMaxRows() - 1, 1).insertCheckboxes();
+  pt.getRange(2, 1, pt.getMaxRows() - 1, 8).setWrap(true).setVerticalAlignment('top');
   ensureSheet_(SHEET.HOLIDAYS, ['日期', '說明']);
 
   ScriptApp.getProjectTriggers().forEach(function (t) { ScriptApp.deleteTrigger(t); });
