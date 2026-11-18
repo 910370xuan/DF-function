@@ -507,6 +507,11 @@ function setup() {
   var al = ensureSheet_(SHEET.ALIASES, ALIAS_HEADERS);
   if (al.getLastRow() < 2) {
     al.getRange(2, 1, Parser.DEFAULT_ALIASES.length, 3).setValues(Parser.DEFAULT_ALIASES.map(function (a) { return [a.alias, a.product, a.pin || '']; }));
+  } else {
+    var haveAlias = al.getRange(2, 1, al.getLastRow() - 1, 1).getValues().map(function (r) { return String(r[0]).trim().toUpperCase(); });
+    Parser.DEFAULT_ALIASES.forEach(function (a) {
+      if (Parser.ADDED_ALIASES.indexOf(a.alias) >= 0 && haveAlias.indexOf(a.alias.toUpperCase()) < 0) al.appendRow([a.alias, a.product, a.pin || '']);
+    });
   }
   var pt = ensureSheet_(SHEET.PARSE_TEST, PARSE_HEADERS);
   pt.getRange(2, 3, pt.getMaxRows() - 1, 1).insertCheckboxes();

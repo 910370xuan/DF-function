@@ -64,7 +64,7 @@ test('傑瑞：幫我出10+1 / 要3付工具 → 查上一筆', () => {
   const r = p('幫我出10+1\n然後要3付工具');
   assert.strictEqual(r.kind, 'unclear');
   assert.deepStrictEqual(r.vague, { qty: 10 });
-  assert.ok(r.reasons.includes('工具品項（待對照）'));
+  assert.deepStrictEqual(r.items, [{ product: '小電池工具組', qty: 3, pin8: 0 }]);
 });
 
 test('麒鎮：小電10+1 → 查上一筆', () => {
@@ -126,4 +126,18 @@ test('上一筆訂單建議', () => {
   ];
   assert.deepStrictEqual(Parser.suggestFromHistory('傑瑞電動車', hist), { product: 'GPB-2000', qty: 10, date: '2026-11-08' });
   assert.strictEqual(Parser.suggestFromHistory('沒來過', hist), null);
+});
+
+test('工具 = 小電池工具組；不需工具只是備註', () => {
+  assert.deepStrictEqual(p('GPB-2000*10 工具x2').items, [{ product: 'GPB-2000', qty: 10, pin8: 0 }, { product: '小電池工具組', qty: 2, pin8: 0 }]);
+  const r = p('GPB-2000 *3 不需要小電池工具組');
+  assert.deepStrictEqual(r.items, [{ product: 'GPB-2000', qty: 3, pin8: 0 }]);
+  assert.deepStrictEqual(r.notes, ['不需工具']);
+  assert.strictEqual(r.kind, 'order');
+});
+
+test('DCB 沒寫 pin → 預設 4pin', () => {
+  const r = p('DCB-6000 *2');
+  assert.deepStrictEqual(r.items, [{ product: 'DCB-6000', qty: 2, pin8: 0 }]);
+  assert.strictEqual(r.kind, 'order');
 });

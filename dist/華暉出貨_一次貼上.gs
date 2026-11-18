@@ -290,7 +290,8 @@ var Parser = (function () {
     ['4PIN', 'DCB-6000', 4], ['8PIN', 'DCB-6000', 8],
     ['GPB-3600', 'GPB-3600'], ['方形小電池', 'GPB-3600'], ['方形', 'GPB-3600'], ['鉛酸', 'GPB-3600'],
     ['飛絡力', 'Lite數位'], ['FL-1800', 'Lite數位'], ['LITE數位', 'Lite數位'],
-    ['AL-1800', 'Lite類比'], ['LITE類比', 'Lite類比'], ['類比', 'Lite類比']
+    ['AL-1800', 'Lite類比'], ['LITE類比', 'Lite類比'], ['類比', 'Lite類比'],
+    ['小電池工具組', '小電池工具組'], ['工具組', '小電池工具組'], ['工具', '小電池工具組']
   ].map(function (a) { return { alias: a[0], product: a[1], pin: a[2] || 0 }; });
 
   /** 只說「小電池」「小電」或只說 10+1：要查上一筆訂單 */
@@ -302,10 +303,9 @@ var Parser = (function () {
     [/統編|發票|收據/, '要統編或發票'],
     [/記帳|下個月帳|月結|月底結|賒/, '帳務備註'],
     [/取消|不要了|改成|改為|更正|修改|換成|追加|多加|再加|加訂/, '改單或追加'],
-    [/工具|起子|批頭/, '工具品項（待對照）'],
     [/還沒收到|沒收到|少寄|寄錯|退貨|換貨|瑕疵|壞/, '客訴或售後']
   ];
-  var NO_TOOL = /(不需|不用|不要|免)(要)?(帶)?工具/;
+  var NO_TOOL = /(不需|不用|不要|免)(要)?(帶)?(小電池)?工具(組)?/g;
 
   function normalize(text) {
     return String(text || '')
@@ -369,6 +369,9 @@ var Parser = (function () {
         return Number(y) === t[0] && Number(m) === t[1] && Number(d) === t[2] ? ' ' : all;
       });
     }
+    var noTool = NO_TOOL.test(raw);
+    NO_TOOL.lastIndex = 0;
+    raw = raw.replace(NO_TOOL, ' '); // 「不需工具」是備註，不是品項
     var lines = raw.split(/[\n\r,，、；;。]+/).map(function (l) { return l.trim(); }).filter(String);
     var items = [], reasons = [], notes = [];
     var vagueQty = 0, pendingDcb = false, mentioned = false;
@@ -379,7 +382,7 @@ var Parser = (function () {
       if (hits.length) mentioned = true;
       if (!hits.length) {
         var vm = line.match(/(\d+)\s*\+\s*1/) || (VAGUE_WORDS.some(function (w) { return line.indexOf(w) >= 0; }) && line.match(new RegExp('(\\d+)\\s*' + UNIT)));
-        if (vm && !/工具|起子|批頭/.test(line)) vagueQty += Number(vm[1]);
+        if (vm) vagueQty += Number(vm[1]);
         return;
       }
       // 同一行連續的 DCB 別名（例：4pin直流電力盒、4PIN 直流）視為同一個品項
@@ -425,11 +428,7 @@ var Parser = (function () {
     });
 
     SPECIAL_PATTERNS.forEach(function (p) { if (p[0].test(raw)) reasons.push(p[1]); });
-    if (NO_TOOL.test(raw)) {
-      notes.push('不需工具');
-      var i = reasons.indexOf('工具品項（待對照）');
-      if (i >= 0 && !/[\d一二三四五六七八九十]\s*(付|副|組|個)?\s*工具/.test(raw.replace(NO_TOOL, ''))) reasons.splice(i, 1);
-    }
+    if (noTool) notes.push('不需工具');
     if (opts.hasImage) reasons.push('含圖片，需人工看圖');
     if (vagueQty) reasons.push('沒寫型號（' + vagueQty + ' 個），需查上一筆訂單');
 
@@ -453,7 +452,10 @@ var Parser = (function () {
 
   function unique(arr) { return arr.filter(function (x, i) { return arr.indexOf(x) === i; }); }
 
-  return { DEFAULT_ALIASES: DEFAULT_ALIASES, normalize: normalize, parse: parse, suggestFromHistory: suggestFromHistory };
+  /** 新版才加入的對照，舊的「型號對照」工作表會自動補上 */
+  var ADDED_ALIASES = ['小電池工具組', '工具組', '工具'];
+
+  return { DEFAULT_ALIASES: DEFAULT_ALIASES, ADDED_ALIASES: ADDED_ALIASES, normalize: normalize, parse: parse, suggestFromHistory: suggestFromHistory };
 })();
 
 if (typeof module !== 'undefined') module.exports = Parser;
@@ -968,6 +970,11 @@ function setup() {
   var al = ensureSheet_(SHEET.ALIASES, ALIAS_HEADERS);
   if (al.getLastRow() < 2) {
     al.getRange(2, 1, Parser.DEFAULT_ALIASES.length, 3).setValues(Parser.DEFAULT_ALIASES.map(function (a) { return [a.alias, a.product, a.pin || '']; }));
+  } else {
+    var haveAlias = al.getRange(2, 1, al.getLastRow() - 1, 1).getValues().map(function (r) { return String(r[0]).trim().toUpperCase(); });
+    Parser.DEFAULT_ALIASES.forEach(function (a) {
+      if (Parser.ADDED_ALIASES.indexOf(a.alias) >= 0 && haveAlias.indexOf(a.alias.toUpperCase()) < 0) al.appendRow([a.alias, a.product, a.pin || '']);
+    });
   }
   var pt = ensureSheet_(SHEET.PARSE_TEST, PARSE_HEADERS);
   pt.getRange(2, 3, pt.getMaxRows() - 1, 1).insertCheckboxes();
