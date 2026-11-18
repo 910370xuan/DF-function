@@ -628,7 +628,7 @@ function runBatch_(type, opts) {
 /** 每家店：複製模板 → 填值 → 跨表公式轉成值 → 一張工作表（第一聯＋第二聯同一頁） */
 function buildInvoices_(ss, groups, today, cfg, tmpSheets) {
   var tpl = mustSheet_(SHEET.INVOICE);
-  var out = SpreadsheetApp.create('出貨單_' + today + '_' + Date.now());
+  var out = newOutput_(ss, '出貨單_' + today + '_' + Date.now());
   var page = Core.parseRowRange(cfg['出貨單列印列']);
   var lastCol = Number(cfg['出貨單列印欄數']) || 9;
   var lastRow = Math.max(page.end, 70);
@@ -668,7 +668,7 @@ function buildInvoices_(ss, groups, today, cfg, tmpSheets) {
 /** 貨運單：每 6 家一張模板（L3:L8），每 3 家一頁 */
 function buildLabels_(ss, stores, cfg, tmpSheets) {
   var tpl = mustSheet_(SHEET.LABEL);
-  var out = SpreadsheetApp.create('貨運單_' + Date.now());
+  var out = newOutput_(ss, '貨運單_' + Date.now());
   var pages = [Core.parseRowRange(cfg['貨運單第一頁列']), Core.parseRowRange(cfg['貨運單第二頁列'])];
   var lastRow = Math.max(pages[0].end, pages[1].end);
   var lastCol = Number(cfg['貨運單列印欄數']) || 9;
@@ -687,6 +687,24 @@ function buildLabels_(ss, stores, cfg, tmpSheets) {
     }
   });
   dropDefaultSheet_(out);
+  return out;
+}
+
+/**
+ * 產單用的新試算表：地區設定、時區、主題字型都跟原本的試算表一樣。
+ * 新建的試算表預設地區可能不是台灣，中文字會被換成別的字型，所以要先對齊。
+ */
+function newOutput_(ss, name) {
+  var out = SpreadsheetApp.create(name);
+  out.setSpreadsheetLocale(ss.getSpreadsheetLocale());
+  out.setSpreadsheetTimeZone(ss.getSpreadsheetTimeZone());
+  try {
+    var theme = ss.getSpreadsheetTheme();
+    if (theme) {
+      var t = out.resetSpreadsheetTheme();
+      t.setFontFamily(theme.getFontFamily());
+    }
+  } catch (e) { /* 主題不支援時沿用預設 */ }
   return out;
 }
 
