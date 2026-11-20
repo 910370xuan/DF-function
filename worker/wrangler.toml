@@ -1,7 +1,7 @@
 # Cloudflare 連結 GitHub 自動部署時使用（根目錄 worker、部署指令 npx wrangler deploy）。
 # name 必須與 Cloudflare 後台的 Worker 名稱完全相同，否則會另外建立一個新的 Worker。
 # 密鑰（LINE_CHANNEL_SECRET、GAS_URL、FORWARD_SECRET）只設定在 Cloudflare 後台，不要寫在這裡。
-name = "huahui-line-webhook"
+name = "df-function"
 main = "index.js"
 compatibility_date = "2026-11-01"
 # 部署時保留後台設定的變數與密鑰

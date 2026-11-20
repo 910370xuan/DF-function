@@ -40,8 +40,8 @@
    - `LINE_CHANNEL_SECRET`：LINE 的 Channel secret
    - `GAS_URL`：Apps Script 網頁應用程式網址（`/exec` 結尾）
    - `FORWARD_SECRET`：試算表「設定金鑰」顯示的轉送密鑰
-4. 複製 Worker 網址（例如 `https://huahui-line.xxx.workers.dev`）。
-5. 回到 LINE Developers → Messaging API → **Webhook URL** 填 `https://huahui-line.xxx.workers.dev/line` → 按 **Verify** 應顯示成功 → 打開 **Use webhook**。
+4. 複製 Worker 網址（例如 `https://df-function.defunction-net.workers.dev`）。
+5. 回到 LINE Developers → Messaging API → **Webhook URL** 填 `https://df-function.defunction-net.workers.dev/line` → 按 **Verify** 應顯示成功 → 打開 **Use webhook**。
 
 ## 四、關鍵測試：手動聊天模式下收不收得到
 1. 用自己的 LINE 加測試官方帳號好友。
