@@ -19,7 +19,7 @@ var PARSE_HEADERS = ['訊息（貼上客戶訊息）', '店家（可空白）', 
 
 var ORDER_HEADERS = ['訂單ID', '收單時間', '出貨日', '店家', '型號', '數量', '8pin數', '附註', '狀態', '批次', '單據編號', '來源', '系統訊息', '折讓金額', '已收金額'];
 var COL = {}; ORDER_HEADERS.forEach(function (h, i) { COL[h] = i; });
-var STATUSES = ['待出貨', '已產單', '已手打', '暫緩', '取消', '已出貨'];
+var STATUSES = ['待出貨', '待確認', '建議', '已產單', '已手打', '暫緩', '取消', '已出貨'];
 var BATCH_HEADERS = ['批次ID', '產生時間', '類型', '店家數', '單據編號', '出貨單PDF', '貨運單PDF', '出貨單Excel', '執行者'];
 var TZ = 'Asia/Taipei';
 var SUPPLEMENT_KEY = '產生補單（勾選執行）';
@@ -46,7 +46,15 @@ var CONFIG_DEFAULTS = [
   ['PDF字型', '', '空白＝與原試算表相同；如果 PDF 的中文字型還是不對，可填 Noto Sans TC 強制指定'],
   ['列印上下邊界', 0.75, '英吋；Google「標準」邊界＝上下 0.75'],
   ['列印左邊界', 0.7, '英吋；Google「標準」邊界＝左右 0.7；貼紙整體偏左就加大、偏右就減小'],
-  [SUPPLEMENT_KEY, false, '勾選後立即產生補單（手機也可以）']
+  [SUPPLEMENT_KEY, false, '勾選後立即產生補單（手機也可以）'],
+  ['試跑模式', true, 'LINE 訂單寫到「LINE試跑」，不會產單；確認準確後取消勾選，改寫入出貨清單'],
+  ['合併等待分鐘', 10, '客戶停止傳訊幾分鐘後，把連續訊息合併成一段處理'],
+  ['強制合併時間', '15:50', '這個時間到當日截止之間，不等待、直接處理所有訊息'],
+  ['接近截止提醒分鐘', 30, '截止前幾分鐘內下的單標成待確認'],
+  ['待確認提醒時間', '15:30', '寄出待確認清單與「不是訂單」訊息清單'],
+  ['AI判讀', false, '勾選後，規則判斷不了的訊息交給 Claude 判讀（需先設定金鑰）'],
+  ['AI模型', 'claude-opus-5-5', '可改 claude-haiku-5-5（較便宜）'],
+  ['AI思考強度', 'low', 'low / medium / high']
 ];
 
 /* ───────────── 選單與觸發 ───────────── */
@@ -57,6 +65,8 @@ function onOpen() {
     .addItem('產生補單', 'menuSupplement')
     .addSeparator()
     .addItem('解析測試（貼訊息試辨識）', 'runParseTest')
+    .addItem('立即處理 LINE 訊息', 'menuProcessLine')
+    .addItem('設定金鑰（LINE／Claude）', 'menuSetKeys')
     .addItem('同步廠商清冊', 'syncVendors')
     .addItem('初始化／修復工作表與排程', 'setup')
     .addToUi();
@@ -71,9 +81,14 @@ function tick() {
   var now = new Date();
   var today = fmtDate_(now);
   var hm = Utilities.formatDate(now, TZ, 'HH:mm');
+  var props = PropertiesService.getScriptProperties();
+  try { processLine_(false); } catch (err) { console.error('LINE 訊息處理失敗', err); }
   if (!Core.isShippingDay(today, readHolidays_(), truthy_(cfg['週六出貨']))) return;
 
-  var props = PropertiesService.getScriptProperties();
+  if (hm >= cfg['待確認提醒時間'] && props.getProperty('remindDone') !== today) {
+    props.setProperty('remindDone', today);
+    try { remindPending_(today); } catch (err) { console.error('提醒失敗', err); }
+  }
   if (hm >= cfg['主批次時間'] && props.getProperty('mainDone') !== today) {
     // 先標記，失敗時只寄一次失敗通知，不會每 5 分鐘重試；可用選單手動重跑
     props.setProperty('mainDone', today);
@@ -86,6 +101,10 @@ function tick() {
 /** 可安裝的 onEdit：勾選「產生補單」 */
 function onEditInstalled(e) {
   var r = e.range;
+  if (r.getSheet().getName() === LINE_SHEET.BIND && r.getColumn() === 3 && r.getRow() > 1 && String(r.getValue()).trim()) {
+    applyBinding_(r.getSheet().getRange(r.getRow(), 1).getValue(), String(r.getValue()).trim());
+    return;
+  }
   if (r.getSheet().getName() !== SHEET.CONFIG || r.getColumn() !== 2) return;
   if (r.getSheet().getRange(r.getRow(), 1).getValue() !== SUPPLEMENT_KEY || r.getValue() !== true) return;
   r.setValue(false);
@@ -525,7 +544,7 @@ function setup() {
   CONFIG_DEFAULTS.forEach(function (d) { if (existing.indexOf(d[0]) < 0) cfg.appendRow(d); });
   var keys = cfg.getRange(1, 1, cfg.getLastRow(), 1).getValues();
   keys.forEach(function (k, i) {
-    if (k[0] === SUPPLEMENT_KEY || k[0] === '週六出貨') cfg.getRange(i + 1, 2).insertCheckboxes();
+    if ([SUPPLEMENT_KEY, '週六出貨', '試跑模式', 'AI判讀'].indexOf(k[0]) >= 0) cfg.getRange(i + 1, 2).insertCheckboxes();
     if (k[0] === '單據編號月份' || String(k[0]).indexOf('時間') >= 0) cfg.getRange(i + 1, 2).setNumberFormat('@');
   });
 
@@ -564,6 +583,14 @@ function setup() {
   pt.getRange(2, 3, pt.getMaxRows() - 1, 1).insertCheckboxes();
   pt.getRange(2, 1, pt.getMaxRows() - 1, 8).setWrap(true).setVerticalAlignment('top');
   ensureSheet_(SHEET.HOLIDAYS, ['日期', '說明']);
+  ensureSheet_(LINE_SHEET.LOG, LOG_HEADERS).setFrozenRows(1);
+  var trial = ensureSheet_(LINE_SHEET.TRIAL, ORDER_HEADERS);
+  trial.setFrozenRows(1);
+  trial.getRange(2, COL['出貨日'] + 1, trial.getMaxRows() - 1, 1).setNumberFormat('yyyy-mm-dd');
+  var bind = ensureSheet_(LINE_SHEET.BIND, BIND_HEADERS);
+  bind.setFrozenRows(1);
+  bind.getRange(2, 3, bind.getMaxRows() - 1, 1).setDataValidation(SpreadsheetApp.newDataValidation()
+    .requireValueInRange(ss.getSheetByName(SHEET.VENDORS).getRange('C2:C'), true).setAllowInvalid(false).build());
 
   ScriptApp.getProjectTriggers().forEach(function (t) { ScriptApp.deleteTrigger(t); });
   ScriptApp.newTrigger('tick').timeBased().everyMinutes(5).create();

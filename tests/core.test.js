@@ -164,3 +164,26 @@ test('折讓／已收金額：同店加總、格式錯誤退回', () => {
   assert.deepStrictEqual(groups.map(g => [g.store, g.discount, g.paid]), [['格錸車業', 1200, 7200], ['麥斯二輪', 0, 0]]);
   assert.deepStrictEqual(errors.map(e => e.rowId), ['d', 'e']);
 });
+
+test('推定出貨日：16:00 前當天、之後下一個出貨日、週末與假日順延', () => {
+  const o = { cutoff: '16:00', nearMinutes: 30, holidays: ['2026-11-23'] };
+  assert.deepStrictEqual(Core.inferShipDate('2026-11-17', '13:10', o), { date: '2026-11-17', nearCutoff: false });
+  assert.deepStrictEqual(Core.inferShipDate('2026-11-17', '15:40', o), { date: '2026-11-17', nearCutoff: true });
+  assert.deepStrictEqual(Core.inferShipDate('2026-11-17', '16:00', o), { date: '2026-11-18', nearCutoff: false });
+  assert.deepStrictEqual(Core.inferShipDate('2026-11-20', '17:43', o), { date: '2026-11-24', nearCutoff: false }); // 週五晚上 → 週一是假日 → 週二
+  assert.deepStrictEqual(Core.inferShipDate('2026-11-15', '16:14', o), { date: '2026-11-16', nearCutoff: false }); // 週日
+  assert.deepStrictEqual(Core.inferShipDate('2026-11-14', '10:00', { ...o, shipSaturday: true }), { date: '2026-11-14', nearCutoff: false });
+  assert.strictEqual(Core.addDays('2026-12-31', 1), '2027-01-01');
+});
+
+test('合併對話：安靜 10 分鐘才送出，強制時全部送出', () => {
+  const m = [
+    { userId: 'A', ts: 0, text: '我要叫貨' },
+    { userId: 'B', ts: 5 * 60e3, text: 'GPB-2000*3' },
+    { userId: 'A', ts: 2 * 60e3, text: 'GPB-2000*3' }
+  ];
+  const now = 13 * 60e3;
+  const ready = Core.readySegments(m, now, 10 * 60e3, false);
+  assert.deepStrictEqual(ready.map(r => [r.userId, r.msgs.map(x => x.text)]), [['A', ['我要叫貨', 'GPB-2000*3']]]);
+  assert.strictEqual(Core.readySegments(m, now, 10 * 60e3, true).length, 2);
+});

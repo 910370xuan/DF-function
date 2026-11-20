@@ -200,6 +200,57 @@ var Core = (function () {
     return true;
   }
 
+  function addDays(dateStr, n) {
+    var p = parseDate(dateStr);
+    var d = new Date(Date.UTC(p.y, p.m - 1, p.d + n));
+    return d.getUTCFullYear() + '-' + pad(d.getUTCMonth() + 1, 2) + '-' + pad(d.getUTCDate(), 2);
+  }
+
+  function nextShippingDay(dateStr, holidays, shipSaturday) {
+    var d = addDays(dateStr, 1);
+    for (var i = 0; i < 30 && !isShippingDay(d, holidays, shipSaturday); i++) d = addDays(d, 1);
+    return d;
+  }
+
+  /**
+   * 推定出貨日：出貨日的截止時間前收到 → 當天；否則下一個出貨日。
+   * 截止前 nearMinutes 分鐘內收到的標記為「接近截止」，請客服判斷。
+   * opts: { holidays, shipSaturday, cutoff: '16:00', nearMinutes: 30 }
+   */
+  function inferShipDate(dateStr, hm, opts) {
+    opts = opts || {};
+    var cutoff = opts.cutoff || '16:00';
+    var holidays = opts.holidays || [];
+    var near = false, date;
+    if (isShippingDay(dateStr, holidays, opts.shipSaturday) && hm < cutoff) {
+      date = dateStr;
+      var c = cutoff.split(':').map(Number), h = hm.split(':').map(Number);
+      near = (c[0] * 60 + c[1]) - (h[0] * 60 + h[1]) <= (opts.nearMinutes == null ? 30 : opts.nearMinutes);
+    } else {
+      date = nextShippingDay(dateStr, holidays, opts.shipSaturday);
+    }
+    return { date: date, nearCutoff: near };
+  }
+
+  /**
+   * 合併對話：同一位客戶最後一則訊息已安靜 quietMs 以上（或 force），整段送出解析。
+   * msgs: [{userId, ts, ...}]（皆為未處理） → [{userId, msgs:[...] }]（依時間排序）
+   */
+  function readySegments(msgs, nowMs, quietMs, force) {
+    var byUser = {}, order = [];
+    msgs.forEach(function (m) {
+      if (!byUser[m.userId]) { byUser[m.userId] = []; order.push(m.userId); }
+      byUser[m.userId].push(m);
+    });
+    var out = [];
+    order.forEach(function (u) {
+      var list = byUser[u].slice().sort(function (a, b) { return a.ts - b.ts; });
+      var last = list[list.length - 1].ts;
+      if (force || nowMs - last >= quietMs) out.push({ userId: u, msgs: list });
+    });
+    return out;
+  }
+
   /** 批次編號：YYYYMMDD-01、-02 … */
   function nextBatchId(dateStr, existingIds) {
     var prefix = dateStr.replace(/-/g, '') + '-';
@@ -261,6 +312,10 @@ var Core = (function () {
     labelPagesFor: labelPagesFor,
     isShippingDay: isShippingDay,
     nextBatchId: nextBatchId,
+    addDays: addDays,
+    nextShippingDay: nextShippingDay,
+    inferShipDate: inferShipDate,
+    readySegments: readySegments,
     pendingSignature: pendingSignature,
     findDuplicates: findDuplicates,
     normalizeDate: normalizeDate,

@@ -1,0 +1,4 @@
+# 只有用 wrangler 指令部署時才需要；用 Cloudflare 網頁後台直接貼程式碼可忽略此檔。
+name = "huahui-line-webhook"
+main = "index.js"
+compatibility_date = "2026-11-01"
