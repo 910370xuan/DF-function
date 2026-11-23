@@ -6,7 +6,7 @@
 
 var LINE_SHEET = { LOG: '訊息紀錄', BIND: 'LINE帳號對照', TRIAL: 'LINE試跑' };
 var LOG_HEADERS = ['收到時間', '事件ID', 'LINE使用者ID', '類型', '內容', '訊息ID', '狀態', '段落ID', '判斷'];
-var BIND_HEADERS = ['LINE使用者ID', 'LINE名稱', '店家', '第一次出現', '備註'];
+var BIND_HEADERS = ['LINE使用者ID', 'LINE名稱', '店家', '第一次出現', '備註', '系統建議店家'];
 var LOG_COL = {}; LOG_HEADERS.forEach(function (h, i) { LOG_COL[h] = i; });
 
 /* ───────────── 接收 ───────────── */
@@ -37,17 +37,26 @@ function storeEvents_(events) {
     var m = ev.message;
     var content = m.type === 'text' ? m.text : ({ image: '[圖片]', sticker: '[貼圖]', video: '[影片]', audio: '[語音]', file: '[檔案]', location: '[位置]' }[m.type] || '[' + m.type + ']');
     log.appendRow([new Date(ev.timestamp), id, ev.source.userId, m.type, content, m.id, '未處理', '', '']);
-    ensureBinding_(ev.source.userId);
+    ensureBinding_(ev.source.userId, m.type === 'text' ? m.text : '');
   });
 }
 
-function ensureBinding_(userId) {
+function ensureBinding_(userId, text) {
   var sh = ensureSheet_(LINE_SHEET.BIND, BIND_HEADERS);
   if (sh.getLastRow() > 1) {
-    var ids = sh.getRange(2, 1, sh.getLastRow() - 1, 1).getValues();
-    for (var i = 0; i < ids.length; i++) if (ids[i][0] === userId) return;
+    var rows = sh.getRange(2, 1, sh.getLastRow() - 1, 6).getValues();
+    for (var i = 0; i < rows.length; i++) {
+      if (rows[i][0] !== userId) continue;
+      // 還沒綁定、也還沒有建議：用新訊息再試一次
+      if (!String(rows[i][2]).trim() && !String(rows[i][5]).trim() && text) {
+        var sug = Parser.suggestVendor([rows[i][1], text], readVendorNames_());
+        if (sug) sh.getRange(i + 2, 6).setValue(sug);
+      }
+      return;
+    }
   }
-  sh.appendRow([userId, lineProfileName_(userId), '', new Date(), '']);
+  var name = lineProfileName_(userId);
+  sh.appendRow([userId, name, '', new Date(), '', Parser.suggestVendor([name, text], readVendorNames_())]);
 }
 
 function lineProfileName_(userId) {
@@ -139,7 +148,7 @@ function handleSegment_(seg, ctx, log) {
   }
   // 還是判斷不了（沒有品項、或有圖片）才交給 Claude
   if (kind === 'unclear' && truthy_(cfg['AI判讀']) && (!items.length || images.length)) {
-    var ai = askClaude_(text, images, ctx);
+    var ai = askClaude_(text, images, ctx, store);
     if (ai.error) {
       reasons.push('AI 判讀失敗：' + ai.error);
     } else {
@@ -150,7 +159,10 @@ function handleSegment_(seg, ctx, log) {
       reasons.push('品項由 AI 判讀，請核對');
     }
   }
-  if (!store) reasons.push('LINE 帳號尚未綁定店家，請到「LINE帳號對照」選擇店家');
+  if (!store) {
+    var hint = Parser.suggestVendor([text], ctx.vendors || (ctx.vendors = readVendorNames_()));
+    reasons.push('LINE 帳號尚未綁定店家，請到「LINE帳號對照」選擇店家' + (hint ? '（系統建議：' + hint + '）' : '（廠商清冊找不到相符店名，可能是新客戶，請先在主檔建檔）'));
+  }
 
   var ship = Core.inferShipDate(recvDate, recvHm, {
     holidays: ctx.holidays, shipSaturday: truthy_(cfg['週六出貨']), cutoff: cfg['當日截止時間'],
@@ -206,7 +218,7 @@ function applyBinding_(userId, store) {
 function notifyUnbound_() {
   var sh = ensureSheet_(LINE_SHEET.BIND, BIND_HEADERS);
   if (sh.getLastRow() < 2) return;
-  var data = sh.getRange(2, 1, sh.getLastRow() - 1, 5).getValues();
+  var data = sh.getRange(2, 1, sh.getLastRow() - 1, 6).getValues();
   var fresh = [];
   data.forEach(function (r, i) {
     if (r[0] && !String(r[2]).trim() && String(r[4]).indexOf('已通知') < 0) {
@@ -217,8 +229,11 @@ function notifyUnbound_() {
   if (!fresh.length) return;
   notify_('【出貨】有 ' + fresh.length + ' 個新的 LINE 帳號，請選擇店家',
     '<p>以下 LINE 帳號第一次傳訊息，請到「' + LINE_SHEET.BIND + '」工作表的「店家」欄選擇是哪一家店（選一次即可）：</p><ul>' +
-    fresh.map(function (r) { return '<li>' + esc_(r[1] || '（未取得名稱）') + '</li>'; }).join('') +
-    '</ul><p><a href="' + SpreadsheetApp.getActive().getUrl() + '">開啟華暉出貨自動化</a></p>', []);
+    fresh.map(function (r) {
+      return '<li>' + esc_(r[1] || '（未取得名稱）') + (r[5] ? '　→ 系統建議：<b>' + esc_(r[5]) + '</b>' : '　→ 找不到相符店名') + '</li>';
+    }).join('') + '</ul><p>建議正確的話，在「店家」欄選同一家即可。找不到的話若是<b>新客戶</b>：請先在主檔「廠商清冊」建檔（店名、地址、電話、收款條件、價格組合），' +
+    '系統產單前會自動同步，再回來選擇店家。這個帳號在綁定前收到的訂單，綁定後會自動補上店家。</p>' +
+    '<p><a href="' + SpreadsheetApp.getActive().getUrl() + '">開啟華暉出貨自動化</a></p>', []);
 }
 
 /* ───────────── 15:30 待確認提醒 ───────────── */
@@ -298,7 +313,7 @@ function aiSchema_(products) {
 }
 
 /** 回傳 { is_order, items, concerns, notes } 或 { error } */
-function askClaude_(text, images, ctx) {
+function askClaude_(text, images, ctx, store) {
   var key = PropertiesService.getScriptProperties().getProperty('ANTHROPIC_API_KEY');
   if (!key) return { error: '尚未設定 Claude API 金鑰' };
   var model = String(ctx.cfg['AI模型'] || 'claude-opus-5-5').trim();
@@ -310,7 +325,14 @@ function askClaude_(text, images, ctx) {
     var blob = lineContent_(img.messageId);
     if (blob) content.push({ type: 'image', source: { type: 'base64', media_type: blob.getContentType(), data: Utilities.base64Encode(blob.getBytes()) } });
   });
-  content.push({ type: 'text', text: '以下是同一位店家連續傳來的訊息（已合併）：\n' + (text || '（只有圖片）') });
+  // 只附這家店最近 3 筆訂單當參考（幾十個 token），不送整份歷史
+  var recent = '';
+  if (store) {
+    ctx.history = ctx.history || readHistory_();
+    var r = Parser.recentFor(store, ctx.history, 3);
+    if (r.length) recent = '這家店最近的訂單（僅供參考，以這次訊息為準）：' + r.map(function (h) { return h.date + ' ' + h.product + ' × ' + h.qty; }).join('；') + '\n';
+  }
+  content.push({ type: 'text', text: recent + '以下是同一位店家連續傳來的訊息（已合併）：\n' + (text || '（只有圖片）') });
 
   var body = {
     model: model,

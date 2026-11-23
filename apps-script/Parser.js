@@ -173,12 +173,43 @@ var Parser = (function () {
     return rows.length ? { product: rows[0].product, qty: Number(rows[0].qty), date: rows[0].date } : null;
   }
 
+  /** 這家店最近 n 筆訂單（給 AI 當參考，不送整份歷史） */
+  function recentFor(store, history, n) {
+    var rows = (history || []).filter(function (h) { return h.store === store && h.product; });
+    rows.sort(function (a, b) { return String(b.date).localeCompare(String(a.date)); });
+    return rows.slice(0, n || 3).map(function (h) { return { product: h.product, qty: Number(h.qty), date: h.date }; });
+  }
+
+  /**
+   * 新 LINE 帳號：用 LINE 名稱與訊息內容比對廠商清冊，找出最可能的店家。
+   * 完整店名出現最優先，其次是去掉「車業／有限公司」等字尾後的店名核心（至少 2 字）。
+   * 有兩家以上同分時不建議（回傳 ''），交給客服選。
+   */
+  var SUFFIX = /(股份有限公司|有限公司|企業社|工作室|車業行|機車行|車業|車行|電動車|電能車業|電能|動能|社區店|商行|科技|國際|實業|企業|貿易|行)$/;
+  function suggestVendor(texts, vendors) {
+    var hay = normalize((texts || []).join(' ')).replace(/\s+/g, '');
+    if (!hay) return '';
+    var best = '', bestScore = 0, tie = false;
+    unique((vendors || []).filter(String)).forEach(function (v) {
+      var full = normalize(v).replace(/\s+/g, '');
+      var core = full;
+      for (var i = 0; i < 3; i++) core = core.replace(/\(.*?\)$/, '').replace(SUFFIX, '');
+      var score = 0;
+      if (full.length >= 2 && hay.indexOf(full) >= 0) score = 100 + full.length;
+      else if (core.length >= 2 && hay.indexOf(core) >= 0) score = core.length;
+      if (!score) return;
+      if (score > bestScore) { best = v; bestScore = score; tie = false; }
+      else if (score === bestScore) tie = true;
+    });
+    return tie ? '' : best;
+  }
+
   function unique(arr) { return arr.filter(function (x, i) { return arr.indexOf(x) === i; }); }
 
   /** 新版才加入的對照，舊的「型號對照」工作表會自動補上 */
   var ADDED_ALIASES = ['小電池工具組', '工具組', '工具'];
 
-  return { DEFAULT_ALIASES: DEFAULT_ALIASES, ADDED_ALIASES: ADDED_ALIASES, normalize: normalize, parse: parse, suggestFromHistory: suggestFromHistory };
+  return { DEFAULT_ALIASES: DEFAULT_ALIASES, ADDED_ALIASES: ADDED_ALIASES, recentFor: recentFor, suggestVendor: suggestVendor, normalize: normalize, parse: parse, suggestFromHistory: suggestFromHistory };
 })();
 
 if (typeof module !== 'undefined') module.exports = Parser;

@@ -505,15 +505,133 @@ var Parser = (function () {
     return rows.length ? { product: rows[0].product, qty: Number(rows[0].qty), date: rows[0].date } : null;
   }
 
+  /** 這家店最近 n 筆訂單（給 AI 當參考，不送整份歷史） */
+  function recentFor(store, history, n) {
+    var rows = (history || []).filter(function (h) { return h.store === store && h.product; });
+    rows.sort(function (a, b) { return String(b.date).localeCompare(String(a.date)); });
+    return rows.slice(0, n || 3).map(function (h) { return { product: h.product, qty: Number(h.qty), date: h.date }; });
+  }
+
+  /**
+   * 新 LINE 帳號：用 LINE 名稱與訊息內容比對廠商清冊，找出最可能的店家。
+   * 完整店名出現最優先，其次是去掉「車業／有限公司」等字尾後的店名核心（至少 2 字）。
+   * 有兩家以上同分時不建議（回傳 ''），交給客服選。
+   */
+  var SUFFIX = /(股份有限公司|有限公司|企業社|工作室|車業行|機車行|車業|車行|電動車|電能車業|電能|動能|社區店|商行|科技|國際|實業|企業|貿易|行)$/;
+  function suggestVendor(texts, vendors) {
+    var hay = normalize((texts || []).join(' ')).replace(/\s+/g, '');
+    if (!hay) return '';
+    var best = '', bestScore = 0, tie = false;
+    unique((vendors || []).filter(String)).forEach(function (v) {
+      var full = normalize(v).replace(/\s+/g, '');
+      var core = full;
+      for (var i = 0; i < 3; i++) core = core.replace(/\(.*?\)$/, '').replace(SUFFIX, '');
+      var score = 0;
+      if (full.length >= 2 && hay.indexOf(full) >= 0) score = 100 + full.length;
+      else if (core.length >= 2 && hay.indexOf(core) >= 0) score = core.length;
+      if (!score) return;
+      if (score > bestScore) { best = v; bestScore = score; tie = false; }
+      else if (score === bestScore) tie = true;
+    });
+    return tie ? '' : best;
+  }
+
   function unique(arr) { return arr.filter(function (x, i) { return arr.indexOf(x) === i; }); }
 
   /** 新版才加入的對照，舊的「型號對照」工作表會自動補上 */
   var ADDED_ALIASES = ['小電池工具組', '工具組', '工具'];
 
-  return { DEFAULT_ALIASES: DEFAULT_ALIASES, ADDED_ALIASES: ADDED_ALIASES, normalize: normalize, parse: parse, suggestFromHistory: suggestFromHistory };
+  return { DEFAULT_ALIASES: DEFAULT_ALIASES, ADDED_ALIASES: ADDED_ALIASES, recentFor: recentFor, suggestVendor: suggestVendor, normalize: normalize, parse: parse, suggestFromHistory: suggestFromHistory };
 })();
 
 if (typeof module !== 'undefined') module.exports = Parser;
+
+
+/**
+ * Excel 列印檔調整（純文字處理，不呼叫 Google 服務，Node 可測試）
+ * Google 匯出的 xlsx 已有 A4、標準邊界、水平置中；這裡補上：
+ *   - 字型：全部改成指定字型（例如 微軟正黑體），可全部加粗
+ *   - 縮放比例：與 Excel／試算表列印時相同（例如 68%）
+ */
+var Xlsx = (function () {
+  // OOXML 規定的元素順序：printOptions / pageMargins / pageSetup 必須放在這些元素之前
+  var AFTER_PAGE_SETUP = ['headerFooter', 'rowBreaks', 'colBreaks', 'customProperties', 'cellWatches', 'ignoredErrors',
+    'smartTags', 'drawing', 'legacyDrawing', 'legacyDrawingHF', 'drawingHF', 'picture', 'oleObjects', 'controls',
+    'webPublishItems', 'tableParts', 'extLst'];
+
+  function escAttr(s) { return String(s).replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;'); }
+
+  /** styles.xml：每個 <font> 改字型、移除 scheme（否則 Excel 會改用佈景主題字型）、可選加粗 */
+  function patchStyles(xml, fontName, bold) {
+    return xml.replace(/<fonts\b[^>]*>[\s\S]*?<\/fonts>/, function (block) {
+      return block.replace(/<font\b[^>]*?(\/>|>[\s\S]*?<\/font>)/g, function (font) {
+        if (/\/>$/.test(font) && !/<\/font>$/.test(font)) font = font.replace(/\/>$/, '></font>');
+        var f = font;
+        if (fontName) {
+          f = f.replace(/<scheme\b[^>]*\/>/g, '').replace(/<family\b[^>]*\/>/g, '').replace(/<charset\b[^>]*\/>/g, '');
+          if (/<name\b[^>]*\/>/.test(f)) f = f.replace(/<name\b[^>]*\/>/, '<name val="' + escAttr(fontName) + '"/>');
+          else f = f.replace(/<\/font>$/, '<name val="' + escAttr(fontName) + '"/></font>');
+        }
+        if (bold && !/<b\s*\/>/.test(f) && !/<b\s+val="(1|true)"\s*\/>/.test(f)) {
+          f = f.replace(/<b\s+val="(0|false)"\s*\/>/, '');
+          f = f.replace(/^(<font\b[^>]*>)/, '$1<b/>');
+        }
+        return f;
+      });
+    });
+  }
+
+  /** sharedStrings.xml：儲存格內個別設定字型的文字（rich text） */
+  function patchSharedStrings(xml, fontName, bold) {
+    var out = xml;
+    if (fontName) out = out.replace(/<rFont\b[^>]*\/>/g, '<rFont val="' + escAttr(fontName) + '"/>');
+    if (bold) out = out.replace(/<rPr>(?![\s\S]{0,40}?<b\s*\/>)/g, '<rPr><b/>');
+    return out;
+  }
+
+  /** 工作表：設定縮放比例（不使用「符合頁面」），其餘列印設定保留 Google 匯出的值 */
+  function patchSheet(xml, opt) {
+    var scale = Math.round(Number(opt.scale) || 100);
+    var out = xml.replace(/<pageSetUpPr\b[^>]*\/>/g, '<pageSetUpPr fitToPage="0"/>');
+    var center = opt.center === false ? '' : ' horizontalCentered="1"';
+    var printOptions = '<printOptions' + center + '/>';
+    var m = opt.margins || {};
+    var pageMargins = '<pageMargins left="' + (m.left == null ? 0.7 : m.left) + '" right="' + (m.right == null ? 0.7 : m.right) +
+      '" top="' + (m.top == null ? 0.75 : m.top) + '" bottom="' + (m.bottom == null ? 0.75 : m.bottom) + '" header="0.3" footer="0.3"/>';
+    var pageSetup = '<pageSetup paperSize="9" scale="' + scale + '" orientation="portrait" pageOrder="overThenDown"/>';
+
+    out = out.replace(/<printOptions\b[^>]*\/>/g, '').replace(/<pageMargins\b[^>]*\/>/g, '')
+      .replace(/<pageSetup\b[^>]*\/>/g, '').replace(/<pageSetup\b[^>]*>[\s\S]*?<\/pageSetup>/g, '')
+      .replace(/<rowBreaks\b[^>]*\/>/g, '').replace(/<rowBreaks\b[^>]*>[\s\S]*?<\/rowBreaks>/g, ''); // 每張工作表只印一頁，不需分頁符號
+    var insert = printOptions + pageMargins + pageSetup;
+    var pos = -1;
+    AFTER_PAGE_SETUP.forEach(function (tag) {
+      var i = out.search(new RegExp('<' + tag + '[\\s>/]'));
+      if (i >= 0 && (pos < 0 || i < pos)) pos = i;
+    });
+    if (pos < 0) pos = out.lastIndexOf('</worksheet>');
+    return out.slice(0, pos) + insert + out.slice(pos);
+  }
+
+  function isSheetPath(p) { return /^xl\/worksheets\/sheet\d+\.xml$/.test(p); }
+
+  /**
+   * files: [{ name, text }]（xlsx 解壓後的文字檔）→ 回傳修改後的 files
+   * opt: { font, bold, scale, margins, center }
+   */
+  function patchFiles(files, opt) {
+    return files.map(function (f) {
+      if (f.name === 'xl/styles.xml') return { name: f.name, text: patchStyles(f.text, opt.font, opt.bold) };
+      if (f.name === 'xl/sharedStrings.xml') return { name: f.name, text: patchSharedStrings(f.text, opt.font, opt.bold) };
+      if (isSheetPath(f.name)) return { name: f.name, text: patchSheet(f.text, opt) };
+      return f;
+    });
+  }
+
+  return { patchStyles: patchStyles, patchSharedStrings: patchSharedStrings, patchSheet: patchSheet, patchFiles: patchFiles, isSheetPath: isSheetPath };
+})();
+
+if (typeof module !== 'undefined') module.exports = Xlsx;
 
 
 /**
@@ -538,7 +656,7 @@ var PARSE_HEADERS = ['訊息（貼上客戶訊息）', '店家（可空白）', 
 var ORDER_HEADERS = ['訂單ID', '收單時間', '出貨日', '店家', '型號', '數量', '8pin數', '附註', '狀態', '批次', '單據編號', '來源', '系統訊息', '折讓金額', '已收金額'];
 var COL = {}; ORDER_HEADERS.forEach(function (h, i) { COL[h] = i; });
 var STATUSES = ['待出貨', '待確認', '建議', '已產單', '已手打', '暫緩', '取消', '已出貨'];
-var BATCH_HEADERS = ['批次ID', '產生時間', '類型', '店家數', '單據編號', '出貨單PDF', '貨運單PDF', '出貨單Excel', '執行者'];
+var BATCH_HEADERS = ['批次ID', '產生時間', '類型', '店家數', '單據編號', '出貨單PDF', '貨運單PDF', '出貨單Excel', '執行者', '貨運單Excel'];
 var TZ = 'Asia/Taipei';
 var SUPPLEMENT_KEY = '產生補單（勾選執行）';
 
@@ -553,7 +671,9 @@ var CONFIG_DEFAULTS = [
   ['當日截止時間', '16:00', '截止後不再詢問補單'],
   ['週六出貨', false, ''],
   ['10+1適用型號', 'GPB-2000,GPB-2000A,GPB-2000S,DCB-6000', '逗號分隔；空白代表所有型號'],
-  ['輸出Excel', true, '除了 PDF 之外，另存一份出貨單 Excel 檔'],
+  ['輸出Excel', true, '列印用 Excel 檔（出貨單、貨運單），已設定字型、A4、縮放比例、置中'],
+  ['Excel字型', '微軟正黑體', 'Excel 列印檔使用的字型（在 Windows 的 Excel 開啟列印）'],
+  ['輸出PDF', true, '另存 PDF（手機查看或備份用；PDF 字型與模板相同，無法使用微軟正黑體）'],
   ['出貨單列印列', '1-57', '第一聯＋第二聯印在同一頁（對應原本第 57 列的分頁符號）'],
   ['出貨單列印欄數', 9, 'A～I 欄'],
   ['出貨單清空欄位', 'B17,E17', '模板上手動輸入的欄位（折讓金額、已收金額），產單前清空；是公式則不動'],
@@ -562,8 +682,6 @@ var CONFIG_DEFAULTS = [
   ['貨運單列印欄數', 9, 'A～I 欄'],
   ['出貨單縮放比例', 68, '%；與 Google 試算表列印的「依分頁符號自動調整（68%）」相同'],
   ['貨運單縮放比例', 68, '%；貼紙對不準時微調，例如 67 或 69'],
-  ['出貨單字型', '', '空白＝與模板相同（建議）。換字型可能讓字變高、版面跑掉；Google 產 PDF 無法使用微軟正黑體'],
-  ['貨運單字型', '', '同上'],
   ['貨運單粗體', true, '貨運單文字全部加粗'],
   ['列印上下邊界', 0.75, '英吋；Google「標準」邊界＝上下 0.75'],
   ['水平對齊', '置中', '置中 或 靠左（與 Google 列印「格式設定 → 對齊 → 橫向」相同）'],
@@ -679,9 +797,19 @@ function runBatch_(type, opts) {
     var name = batchId + '_' + type;
     var invParams = printParams_(mustSheet_(SHEET.INVOICE), Number(cfg['出貨單列印欄數']) || 9, cfg['出貨單縮放比例'], cfg);
     var lblParams = printParams_(mustSheet_(SHEET.LABEL), Number(cfg['貨運單列印欄數']) || 9, cfg['貨運單縮放比例'], cfg);
-    var invPdf = folder.createFile(exportBlob_(invSS.getId(), 'pdf', invParams).setName('出貨單_' + name + '.pdf'));
-    var lblPdf = folder.createFile(exportBlob_(lblSS.getId(), 'pdf', lblParams).setName('貨運單_' + name + '.pdf'));
-    var invXlsx = truthy_(cfg['輸出Excel']) ? folder.createFile(exportBlob_(invSS.getId(), 'xlsx', '').setName('出貨單_' + name + '.xlsx')) : null;
+    var wantPdf = truthy_(cfg['輸出PDF']), wantXlsx = truthy_(cfg['輸出Excel']);
+    if (!wantPdf && !wantXlsx) wantXlsx = true;
+    var xlsxOpt = function (pct) {
+      return { font: String(cfg['Excel字型'] || '').trim(), scale: Number(pct) || 68, center: String(cfg['水平對齊']).trim() !== '靠左',
+        margins: { top: Number(cfg['列印上下邊界']) || 0.75, bottom: Number(cfg['列印上下邊界']) || 0.75 } };
+    };
+    var invPdf = wantPdf ? folder.createFile(exportBlob_(invSS.getId(), 'pdf', invParams).setName('出貨單_' + name + '.pdf')) : null;
+    var lblPdf = wantPdf ? folder.createFile(exportBlob_(lblSS.getId(), 'pdf', lblParams).setName('貨運單_' + name + '.pdf')) : null;
+    var invXlsx = wantXlsx ? folder.createFile(printXlsx_(invSS.getId(), '出貨單_' + name + '.xlsx', xlsxOpt(cfg['出貨單縮放比例']))) : null;
+    var lblXlsx = wantXlsx ? folder.createFile(printXlsx_(lblSS.getId(), '貨運單_' + name + '.xlsx',
+      Object.assign(xlsxOpt(cfg['貨運單縮放比例']), { bold: truthy_(cfg['貨運單粗體']) }))) : null;
+    var url = function (f) { return f ? f.getUrl() : ''; };
+    var attachments = [invXlsx, lblXlsx, invPdf, lblPdf].filter(Boolean).map(function (f) { return f.getBlob(); });
 
     // 全部成功才寫回：編號、訂單狀態、批次紀錄
     setConfig_('單據編號月份', state.month);
@@ -690,12 +818,12 @@ function runBatch_(type, opts) {
     ss.getSheetByName(SHEET.BATCHES).appendRow([
       batchId, new Date(), type, built.groups.length,
       built.groups.map(function (g) { return g.orderNo; }).join(', '),
-      invPdf.getUrl(), lblPdf.getUrl(), invXlsx ? invXlsx.getUrl() : '',
-      Session.getEffectiveUser().getEmail()
+      url(invPdf), url(lblPdf), url(invXlsx),
+      Session.getEffectiveUser().getEmail(), url(lblXlsx)
     ]);
 
     notify_('【出貨】' + today + ' ' + type + ' ' + batchId + '：' + built.groups.length + ' 家店',
-      summaryHtml_(built, batchId, ss.getUrl()), [invPdf.getBlob(), lblPdf.getBlob()]);
+      summaryHtml_(built, batchId, ss.getUrl()), attachments);
     return { ok: true, message: type + ' ' + batchId + ' 完成：' + built.groups.length + ' 家店' };
   } catch (err) {
     notify_('【出貨】產單失敗', '<p>' + type + ' 產單失敗，訂單狀態與單據編號都沒有變更。</p><pre>' + esc_(err && err.stack || err) + '</pre>', []);
@@ -743,7 +871,7 @@ function buildInvoices_(ss, groups, today, cfg, tmpSheets) {
     freezeCrossSheet_(tmp, lastRow, tmp.getLastColumn()); // 含 N3 價格組合
 
     var s = tmp.copyTo(out).setName((i + 1) + '_' + g.store);
-    applyFont_(s, page, lastCol, cfg['出貨單字型'], false);
+    freezeAll_(s, page, lastCol);
     showOnly_(s, page, lastCol);
   });
   dropDefaultSheet_(out);
@@ -768,7 +896,7 @@ function buildLabels_(ss, stores, cfg, tmpSheets) {
     freezeCrossSheet_(tmp, lastRow, tmp.getLastColumn());
     for (var p = 0; p < Core.labelPagesFor(chunk.length); p++) {
       var s = tmp.copyTo(out).setName('標籤_' + (ci * 2 + p + 1));
-      applyFont_(s, pages[p], lastCol, cfg['貨運單字型'], truthy_(cfg['貨運單粗體']));
+      applyFont_(s, pages[p], lastCol, '', truthy_(cfg['貨運單粗體']));
       showOnly_(s, pages[p], lastCol);
     }
   });
@@ -795,6 +923,29 @@ function newOutput_(ss, name) {
     }
   } catch (e) { /* 主題不支援時沿用預設 */ }
   return out;
+}
+
+/** 匯出 Excel 並套用列印設定（字型、縮放、置中） */
+function printXlsx_(ssId, fileName, opt) {
+  var blobs = Utilities.unzip(exportBlob_(ssId, 'xlsx', '').setContentType('application/zip'));
+  var out = blobs.map(function (b) {
+    var n = b.getName();
+    if (n === 'xl/styles.xml' || n === 'xl/sharedStrings.xml' || Xlsx.isSheetPath(n)) {
+      var patched = Xlsx.patchFiles([{ name: n, text: b.getDataAsString('UTF-8') }], opt)[0].text;
+      return Utilities.newBlob(patched, 'application/xml', n);
+    }
+    return b;
+  });
+  out.sort(function (a, b) { return a.getName() === '[Content_Types].xml' ? -1 : b.getName() === '[Content_Types].xml' ? 1 : 0; });
+  return Utilities.zip(out, fileName).setContentType('application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+}
+
+/** 出貨單列印範圍內的公式全部轉成值（Excel 開啟時不會重算出不同結果，例如 DATEVALUE） */
+function freezeAll_(sheet, page, lastCol) {
+  var rng = sheet.getRange(page.start, 1, page.end - page.start + 1, lastCol);
+  var f = rng.getFormulas();
+  if (!f.some(function (r) { return r.some(String); })) return;
+  rng.setValues(rng.getValues());
 }
 
 function subfolder_(parent, name) {
@@ -1093,7 +1244,7 @@ function setup() {
   });
 
   var cfg = ensureSheet_(SHEET.CONFIG, ['項目', '值', '說明']);
-  var obsolete = ['出貨單第一聯列', '出貨單第二聯列', '列印欄數', '出貨單PDF參數', '貨運單PDF參數', '出貨單列印設定', '貨運單列印設定', 'PDF字型'];
+  var obsolete = ['出貨單第一聯列', '出貨單第二聯列', '列印欄數', '出貨單PDF參數', '貨運單PDF參數', '出貨單列印設定', '貨運單列印設定', 'PDF字型', '出貨單字型', '貨運單字型'];
   // 上一版預設字型 Noto Sans TC 會讓版面跑掉：只清除一次，之後使用者自己填的不再更動
   var sp = PropertiesService.getScriptProperties();
   if (!sp.getProperty('fontReset1')) {
@@ -1116,7 +1267,7 @@ function setup() {
   CONFIG_DEFAULTS.forEach(function (d) { if (existing.indexOf(d[0]) < 0) cfg.appendRow(d); });
   var keys = cfg.getRange(1, 1, cfg.getLastRow(), 1).getValues();
   keys.forEach(function (k, i) {
-    if ([SUPPLEMENT_KEY, '週六出貨', '試跑模式', 'AI判讀', '輸出Excel', '貨運單粗體'].indexOf(k[0]) >= 0) cfg.getRange(i + 1, 2).insertCheckboxes();
+    if ([SUPPLEMENT_KEY, '週六出貨', '試跑模式', 'AI判讀', '輸出Excel', '輸出PDF', '貨運單粗體'].indexOf(k[0]) >= 0) cfg.getRange(i + 1, 2).insertCheckboxes();
     if (k[0] === '單據編號月份' || String(k[0]).indexOf('時間') >= 0) cfg.getRange(i + 1, 2).setNumberFormat('@');
   });
 
@@ -1141,7 +1292,8 @@ function setup() {
     .requireValueInList(STATUSES, true).setAllowInvalid(false).build());
   orders.setFrozenRows(1);
 
-  ensureSheet_(SHEET.BATCHES, BATCH_HEADERS);
+  var bh = ensureSheet_(SHEET.BATCHES, BATCH_HEADERS);
+  bh.getRange(1, 1, 1, BATCH_HEADERS.length).setValues([BATCH_HEADERS]).setFontWeight('bold');
   var al = ensureSheet_(SHEET.ALIASES, ALIAS_HEADERS);
   if (al.getLastRow() < 2) {
     al.getRange(2, 1, Parser.DEFAULT_ALIASES.length, 3).setValues(Parser.DEFAULT_ALIASES.map(function (a) { return [a.alias, a.product, a.pin || '']; }));
@@ -1160,6 +1312,7 @@ function setup() {
   trial.setFrozenRows(1);
   trial.getRange(2, COL['出貨日'] + 1, trial.getMaxRows() - 1, 1).setNumberFormat('yyyy-mm-dd');
   var bind = ensureSheet_(LINE_SHEET.BIND, BIND_HEADERS);
+  bind.getRange(1, 1, 1, BIND_HEADERS.length).setValues([BIND_HEADERS]).setFontWeight('bold');
   bind.setFrozenRows(1);
   bind.getRange(2, 3, bind.getMaxRows() - 1, 1).setDataValidation(SpreadsheetApp.newDataValidation()
     .requireValueInRange(ss.getSheetByName(SHEET.VENDORS).getRange('C2:C'), true).setAllowInvalid(false).build());
@@ -1180,7 +1333,7 @@ function notify_(subject, html, attachments) {
 function summaryHtml_(built, batchId, url) {
   var warn = built.groups.filter(function (g) { return g.duplicateVendor; })
     .map(function (g) { return '<li>' + esc_(g.store) + '：廠商清冊有同名店家，已套用第一筆資料，請核對</li>'; }).join('');
-  return '<p>批次 ' + batchId + '，附件為出貨單與貨運單 PDF（Excel 檔已存在雲端硬碟）。</p>' +
+  return '<p>批次 ' + batchId + '，附件為出貨單與貨運單。<b>列印請用 Excel 檔</b>（已設定微軟正黑體、A4、縮放比例與置中，用 Excel 開啟後直接列印「整本活頁簿」）；PDF 供手機查看或備份。</p>' +
     groupsTable_(built.groups) + (warn ? '<p>⚠ 請注意：</p><ul>' + warn + '</ul>' : '') +
     errorsHtml_(built.errors) + '<p><a href="' + url + '">開啟華暉出貨自動化</a></p>';
 }
@@ -1243,7 +1396,7 @@ function showResult_(res) {
 
 var LINE_SHEET = { LOG: '訊息紀錄', BIND: 'LINE帳號對照', TRIAL: 'LINE試跑' };
 var LOG_HEADERS = ['收到時間', '事件ID', 'LINE使用者ID', '類型', '內容', '訊息ID', '狀態', '段落ID', '判斷'];
-var BIND_HEADERS = ['LINE使用者ID', 'LINE名稱', '店家', '第一次出現', '備註'];
+var BIND_HEADERS = ['LINE使用者ID', 'LINE名稱', '店家', '第一次出現', '備註', '系統建議店家'];
 var LOG_COL = {}; LOG_HEADERS.forEach(function (h, i) { LOG_COL[h] = i; });
 
 /* ───────────── 接收 ───────────── */
@@ -1274,17 +1427,26 @@ function storeEvents_(events) {
     var m = ev.message;
     var content = m.type === 'text' ? m.text : ({ image: '[圖片]', sticker: '[貼圖]', video: '[影片]', audio: '[語音]', file: '[檔案]', location: '[位置]' }[m.type] || '[' + m.type + ']');
     log.appendRow([new Date(ev.timestamp), id, ev.source.userId, m.type, content, m.id, '未處理', '', '']);
-    ensureBinding_(ev.source.userId);
+    ensureBinding_(ev.source.userId, m.type === 'text' ? m.text : '');
   });
 }
 
-function ensureBinding_(userId) {
+function ensureBinding_(userId, text) {
   var sh = ensureSheet_(LINE_SHEET.BIND, BIND_HEADERS);
   if (sh.getLastRow() > 1) {
-    var ids = sh.getRange(2, 1, sh.getLastRow() - 1, 1).getValues();
-    for (var i = 0; i < ids.length; i++) if (ids[i][0] === userId) return;
+    var rows = sh.getRange(2, 1, sh.getLastRow() - 1, 6).getValues();
+    for (var i = 0; i < rows.length; i++) {
+      if (rows[i][0] !== userId) continue;
+      // 還沒綁定、也還沒有建議：用新訊息再試一次
+      if (!String(rows[i][2]).trim() && !String(rows[i][5]).trim() && text) {
+        var sug = Parser.suggestVendor([rows[i][1], text], readVendorNames_());
+        if (sug) sh.getRange(i + 2, 6).setValue(sug);
+      }
+      return;
+    }
   }
-  sh.appendRow([userId, lineProfileName_(userId), '', new Date(), '']);
+  var name = lineProfileName_(userId);
+  sh.appendRow([userId, name, '', new Date(), '', Parser.suggestVendor([name, text], readVendorNames_())]);
 }
 
 function lineProfileName_(userId) {
@@ -1376,7 +1538,7 @@ function handleSegment_(seg, ctx, log) {
   }
   // 還是判斷不了（沒有品項、或有圖片）才交給 Claude
   if (kind === 'unclear' && truthy_(cfg['AI判讀']) && (!items.length || images.length)) {
-    var ai = askClaude_(text, images, ctx);
+    var ai = askClaude_(text, images, ctx, store);
     if (ai.error) {
       reasons.push('AI 判讀失敗：' + ai.error);
     } else {
@@ -1387,7 +1549,10 @@ function handleSegment_(seg, ctx, log) {
       reasons.push('品項由 AI 判讀，請核對');
     }
   }
-  if (!store) reasons.push('LINE 帳號尚未綁定店家，請到「LINE帳號對照」選擇店家');
+  if (!store) {
+    var hint = Parser.suggestVendor([text], ctx.vendors || (ctx.vendors = readVendorNames_()));
+    reasons.push('LINE 帳號尚未綁定店家，請到「LINE帳號對照」選擇店家' + (hint ? '（系統建議：' + hint + '）' : '（廠商清冊找不到相符店名，可能是新客戶，請先在主檔建檔）'));
+  }
 
   var ship = Core.inferShipDate(recvDate, recvHm, {
     holidays: ctx.holidays, shipSaturday: truthy_(cfg['週六出貨']), cutoff: cfg['當日截止時間'],
@@ -1443,7 +1608,7 @@ function applyBinding_(userId, store) {
 function notifyUnbound_() {
   var sh = ensureSheet_(LINE_SHEET.BIND, BIND_HEADERS);
   if (sh.getLastRow() < 2) return;
-  var data = sh.getRange(2, 1, sh.getLastRow() - 1, 5).getValues();
+  var data = sh.getRange(2, 1, sh.getLastRow() - 1, 6).getValues();
   var fresh = [];
   data.forEach(function (r, i) {
     if (r[0] && !String(r[2]).trim() && String(r[4]).indexOf('已通知') < 0) {
@@ -1454,8 +1619,11 @@ function notifyUnbound_() {
   if (!fresh.length) return;
   notify_('【出貨】有 ' + fresh.length + ' 個新的 LINE 帳號，請選擇店家',
     '<p>以下 LINE 帳號第一次傳訊息，請到「' + LINE_SHEET.BIND + '」工作表的「店家」欄選擇是哪一家店（選一次即可）：</p><ul>' +
-    fresh.map(function (r) { return '<li>' + esc_(r[1] || '（未取得名稱）') + '</li>'; }).join('') +
-    '</ul><p><a href="' + SpreadsheetApp.getActive().getUrl() + '">開啟華暉出貨自動化</a></p>', []);
+    fresh.map(function (r) {
+      return '<li>' + esc_(r[1] || '（未取得名稱）') + (r[5] ? '　→ 系統建議：<b>' + esc_(r[5]) + '</b>' : '　→ 找不到相符店名') + '</li>';
+    }).join('') + '</ul><p>建議正確的話，在「店家」欄選同一家即可。找不到的話若是<b>新客戶</b>：請先在主檔「廠商清冊」建檔（店名、地址、電話、收款條件、價格組合），' +
+    '系統產單前會自動同步，再回來選擇店家。這個帳號在綁定前收到的訂單，綁定後會自動補上店家。</p>' +
+    '<p><a href="' + SpreadsheetApp.getActive().getUrl() + '">開啟華暉出貨自動化</a></p>', []);
 }
 
 /* ───────────── 15:30 待確認提醒 ───────────── */
@@ -1535,7 +1703,7 @@ function aiSchema_(products) {
 }
 
 /** 回傳 { is_order, items, concerns, notes } 或 { error } */
-function askClaude_(text, images, ctx) {
+function askClaude_(text, images, ctx, store) {
   var key = PropertiesService.getScriptProperties().getProperty('ANTHROPIC_API_KEY');
   if (!key) return { error: '尚未設定 Claude API 金鑰' };
   var model = String(ctx.cfg['AI模型'] || 'claude-opus-5-5').trim();
@@ -1547,7 +1715,14 @@ function askClaude_(text, images, ctx) {
     var blob = lineContent_(img.messageId);
     if (blob) content.push({ type: 'image', source: { type: 'base64', media_type: blob.getContentType(), data: Utilities.base64Encode(blob.getBytes()) } });
   });
-  content.push({ type: 'text', text: '以下是同一位店家連續傳來的訊息（已合併）：\n' + (text || '（只有圖片）') });
+  // 只附這家店最近 3 筆訂單當參考（幾十個 token），不送整份歷史
+  var recent = '';
+  if (store) {
+    ctx.history = ctx.history || readHistory_();
+    var r = Parser.recentFor(store, ctx.history, 3);
+    if (r.length) recent = '這家店最近的訂單（僅供參考，以這次訊息為準）：' + r.map(function (h) { return h.date + ' ' + h.product + ' × ' + h.qty; }).join('；') + '\n';
+  }
+  content.push({ type: 'text', text: recent + '以下是同一位店家連續傳來的訊息（已合併）：\n' + (text || '（只有圖片）') });
 
   var body = {
     model: model,

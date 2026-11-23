@@ -141,3 +141,17 @@ test('DCB 沒寫 pin → 預設 4pin', () => {
   assert.deepStrictEqual(r.items, [{ product: 'DCB-6000', qty: 2, pin8: 0 }]);
   assert.strictEqual(r.kind, 'order');
 });
+
+test('新帳號建議店家', () => {
+  const v = ['格錸車業', '麒鎮車業行', '信耀車業(午後收貨)', '微霖科技有限公司', '倫勝電能車業', '基隆基金Gogoro社區店', '傑瑞電動車', '麥斯二輪'];
+  assert.strictEqual(Parser.suggestVendor(['Jason 徐', '2026/11/12 Hi 高雄gogoro社區店-格錸車業 要訂貨'], v), '格錸車業');
+  assert.strictEqual(Parser.suggestVendor(['麒鎮車業/吾小吳'], v), '麒鎮車業行');
+  assert.strictEqual(Parser.suggestVendor(['信耀車業（午後）'], v), '信耀車業(午後收貨)');
+  assert.strictEqual(Parser.suggestVendor(['Jerry Wang', '幫我出10+1'], v), '');
+  assert.strictEqual(Parser.suggestVendor(['我是微霖'], v), '微霖科技有限公司');
+});
+
+test('最近 3 筆訂單', () => {
+  const h = [1, 2, 3, 4].map(i => ({ store: 'A', product: 'GPB-2000', qty: i, date: '2026-11-0' + i }));
+  assert.deepStrictEqual(Parser.recentFor('A', h, 3).map(x => x.qty), [4, 3, 2]);
+});
