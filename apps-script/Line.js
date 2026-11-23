@@ -181,7 +181,7 @@ function handleSegment_(seg, ctx, log) {
   var lines = items.length ? items : [{ product: '', qty: '', pin8: 0 }];
   var rows = lines.map(function (it) {
     return [Utilities.getUuid().slice(0, 8), recvAt, shipText, store, it.product, it.qty, it.pin8 || '', unique_(notes).join('/'),
-      status, '', '', source, sys, '', ''];
+      status, '', '', source, sys, '', '', false];
   });
   var target = ensureSheet_(trial ? LINE_SHEET.TRIAL : SHEET.ORDERS, ORDER_HEADERS);
   target.getRange(target.getLastRow() + 1, 1, rows.length, ORDER_HEADERS.length).setValues(rows);

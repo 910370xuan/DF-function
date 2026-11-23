@@ -17,7 +17,7 @@ var SHEET = {
 var ALIAS_HEADERS = ['客戶說法', '型號', 'pin（4 或 8，可空白）'];
 var PARSE_HEADERS = ['訊息（貼上客戶訊息）', '店家（可空白）', '有圖片', '判斷', '品項', '備註', '需確認原因', '上一筆訂單建議'];
 
-var ORDER_HEADERS = ['訂單ID', '收單時間', '出貨日', '店家', '型號', '數量', '8pin數', '附註', '狀態', '批次', '單據編號', '來源', '系統訊息', '折讓金額', '已收金額'];
+var ORDER_HEADERS = ['訂單ID', '收單時間', '出貨日', '店家', '型號', '數量', '8pin數', '附註', '狀態', '批次', '單據編號', '來源', '系統訊息', '折讓金額', '已收金額', '確認'];
 var COL = {}; ORDER_HEADERS.forEach(function (h, i) { COL[h] = i; });
 var STATUSES = ['待出貨', '待確認', '建議', '已產單', '已手打', '暫緩', '取消', '已出貨'];
 var BATCH_HEADERS = ['批次ID', '產生時間', '類型', '店家數', '單據編號', '出貨單PDF', '貨運單PDF', '出貨單Excel', '執行者', '貨運單Excel'];
@@ -74,6 +74,7 @@ function onOpen() {
     .addItem('設定金鑰（LINE／Claude）', 'menuSetKeys')
     .addItem('同步廠商清冊', 'syncVendors')
     .addItem('清理產單暫存試算表', 'cleanupTempSheets')
+    .addItem('整理表格外觀', 'menuFormatSheets')
     .addItem('初始化／修復工作表與排程', 'setup')
     .addToUi();
 }
@@ -107,6 +108,10 @@ function tick() {
 /** 可安裝的 onEdit：勾選「產生補單」 */
 function onEditInstalled(e) {
   var r = e.range;
+  if (r.getSheet().getName() === SHEET.ORDERS && r.getColumn() <= COL['確認'] + 1 && r.getLastColumn() >= COL['確認'] + 1) {
+    handleConfirmEdit_(r);
+    return;
+  }
   if (r.getSheet().getName() === LINE_SHEET.BIND && r.getColumn() === 3 && r.getRow() > 1 && String(r.getValue()).trim()) {
     applyBinding_(r.getSheet().getRange(r.getRow(), 1).getValue(), String(r.getValue()).trim());
     return;
@@ -684,6 +689,7 @@ function setup() {
   ScriptApp.getProjectTriggers().forEach(function (t) { ScriptApp.deleteTrigger(t); });
   ScriptApp.newTrigger('tick').timeBased().everyMinutes(5).create();
   ScriptApp.newTrigger('onEditInstalled').forSpreadsheet(ss).onEdit().create();
+  formatSheets_();
   return '完成';
 }
 

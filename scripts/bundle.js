@@ -9,7 +9,8 @@ const out = [
   read('Parser.js'),
   read('Xlsx.js'),
   read('Main.js'),
-  read('Line.js')
+  read('Line.js'),
+  read('Ui.js')
 ].join('\n\n');
 fs.mkdirSync(path.join(root, 'dist'), { recursive: true });
 fs.writeFileSync(path.join(root, 'dist', '華暉出貨_一次貼上.gs'), out);
