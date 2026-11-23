@@ -311,11 +311,27 @@ function freezeCrossSheet_(sheet, lastRow, lastCol) {
 }
 
 /** 列印時只顯示指定列與欄（隱藏的列欄不會出現在 PDF）；列印範圍外的浮動圖片移除 */
-/** 只套用在產出的 PDF，不會改到模板 */
+/**
+ * 只套用在產出的 PDF，不會改到模板。
+ * 換字型會讓 Google 自動加高列高、把版面撐到下一頁，所以換完後把列高固定回模板原本的高度。
+ */
 function applyFont_(sheet, page, lastCol, font, bold) {
-  var rng = sheet.getRange(page.start, 1, page.end - page.start + 1, lastCol);
-  if (String(font || '').trim()) rng.setFontFamily(String(font).trim());
+  font = String(font || '').trim();
+  if (!font && !bold) return;
+  var n = page.end - page.start + 1;
+  var heights = [];
+  for (var r = page.start; r <= page.end; r++) heights.push(sheet.getRowHeight(r));
+  var rng = sheet.getRange(page.start, 1, n, lastCol);
+  if (font) rng.setFontFamily(font);
   if (bold) rng.setFontWeight('bold');
+  // 連續同高度的列一次設定
+  var i = 0;
+  while (i < n) {
+    var j = i;
+    while (j + 1 < n && heights[j + 1] === heights[i]) j++;
+    sheet.setRowHeightsForced(page.start + i, j - i + 1, heights[i]);
+    i = j + 1;
+  }
 }
 
 function showOnly_(sheet, page, lastCol) {
