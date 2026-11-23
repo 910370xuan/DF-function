@@ -49,3 +49,13 @@ test('轉送失敗會重試', async () => {
   assert.strictEqual(ok, true);
   assert.strictEqual(n, 2);
 });
+
+test('Channel secret 前後有空白也能驗證；/check 只顯示是否設定', async () => {
+  const res = await worker.fetch(new Request('https://w/line', { method: 'POST', body: JSON.stringify({ events: [] }), headers: { 'x-line-signature': sign(JSON.stringify({ events: [] })) } }),
+    { LINE_CHANNEL_SECRET: '  ' + SECRET + '\n' }, { waitUntil() {} });
+  assert.strictEqual(res.status, 200);
+  const chk = await (await worker.fetch(new Request('https://w/check'), { LINE_CHANNEL_SECRET: SECRET, GAS_URL: 'https://x/exec' }, {})).text();
+  assert.match(chk, /LINE_CHANNEL_SECRET：已設定/);
+  assert.match(chk, /FORWARD_SECRET：❌ 未設定/);
+  assert.ok(!chk.includes(SECRET));
+});

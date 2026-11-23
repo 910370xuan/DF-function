@@ -26,12 +26,12 @@ export async function verifyLineSignature(rawBody, signature, channelSecret) {
 }
 
 export async function forward(env, rawBody, fetchImpl = fetch) {
-  const payload = JSON.stringify({ secret: env.FORWARD_SECRET, body: rawBody });
+  const payload = JSON.stringify({ secret: String(env.FORWARD_SECRET || '').trim(), body: rawBody });
   let lastErr;
   for (let attempt = 0; attempt < 3; attempt++) {
     try {
       // Apps Script 收到 POST 後會先處理再回 302；處理已完成，不需要跟著轉址
-      const res = await fetchImpl(env.GAS_URL, {
+      const res = await fetchImpl(String(env.GAS_URL || '').trim(), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: payload,
@@ -51,11 +51,22 @@ export async function forward(env, rawBody, fetchImpl = fetch) {
 export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
+    if (request.method === 'GET' && url.pathname === '/check') {
+      // 只顯示有沒有設定，不顯示內容
+      const has = k => (env[k] && String(env[k]).trim() ? '已設定' : '❌ 未設定');
+      const lines = [
+        'LINE_CHANNEL_SECRET：' + has('LINE_CHANNEL_SECRET') + (env.LINE_CHANNEL_SECRET ? '（長度 ' + String(env.LINE_CHANNEL_SECRET).trim().length + '，正常為 32）' : ''),
+        'GAS_URL：' + has('GAS_URL') + (env.GAS_URL && !/\/exec\s*$/.test(env.GAS_URL) ? '（⚠ 結尾應為 /exec）' : ''),
+        'FORWARD_SECRET：' + has('FORWARD_SECRET')
+      ];
+      return new Response(lines.join('\n'), { headers: { 'content-type': 'text/plain; charset=utf-8' } });
+    }
     if (request.method === 'GET') return new Response('ok');
     if (request.method !== 'POST' || url.pathname !== '/line') return new Response('not found', { status: 404 });
 
     const raw = await request.text();
-    const ok = await verifyLineSignature(raw, request.headers.get('x-line-signature'), env.LINE_CHANNEL_SECRET);
+    // 貼上時多出的空白或換行不影響驗證
+    const ok = await verifyLineSignature(raw, request.headers.get('x-line-signature'), String(env.LINE_CHANNEL_SECRET || '').trim());
     if (!ok) return new Response('bad signature', { status: 401 });
 
     // LINE 後台按「驗證」時送的是空事件，直接回 200
