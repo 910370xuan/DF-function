@@ -44,8 +44,8 @@ var CONFIG_DEFAULTS = [
   ['貨運單列印欄數', 9, 'A～I 欄'],
   ['出貨單縮放比例', 68, '%；與 Google 試算表列印的「依分頁符號自動調整（68%）」相同'],
   ['貨運單縮放比例', 68, '%；貼紙對不準時微調，例如 67 或 69'],
-  ['出貨單字型', 'Noto Sans TC', 'Google 產 PDF 只能用 Google 字型；Noto Sans TC（思源黑體）最接近微軟正黑體；空白＝不變'],
-  ['貨運單字型', 'Noto Sans TC', '同上'],
+  ['出貨單字型', '', '空白＝與模板相同（建議）。換字型可能讓字變高、版面跑掉；Google 產 PDF 無法使用微軟正黑體'],
+  ['貨運單字型', '', '同上'],
   ['貨運單粗體', true, '貨運單文字全部加粗'],
   ['列印上下邊界', 0.75, '英吋；Google「標準」邊界＝上下 0.75'],
   ['水平對齊', '置中', '置中 或 靠左（與 Google 列印「格式設定 → 對齊 → 橫向」相同）'],
@@ -311,27 +311,11 @@ function freezeCrossSheet_(sheet, lastRow, lastCol) {
 }
 
 /** 列印時只顯示指定列與欄（隱藏的列欄不會出現在 PDF）；列印範圍外的浮動圖片移除 */
-/**
- * 只套用在產出的 PDF，不會改到模板。
- * 換字型會讓 Google 自動加高列高、把版面撐到下一頁，所以換完後把列高固定回模板原本的高度。
- */
+/** 只套用在產出的 PDF，不會改到模板 */
 function applyFont_(sheet, page, lastCol, font, bold) {
-  font = String(font || '').trim();
-  if (!font && !bold) return;
-  var n = page.end - page.start + 1;
-  var heights = [];
-  for (var r = page.start; r <= page.end; r++) heights.push(sheet.getRowHeight(r));
-  var rng = sheet.getRange(page.start, 1, n, lastCol);
-  if (font) rng.setFontFamily(font);
+  var rng = sheet.getRange(page.start, 1, page.end - page.start + 1, lastCol);
+  if (String(font || '').trim()) rng.setFontFamily(String(font).trim());
   if (bold) rng.setFontWeight('bold');
-  // 連續同高度的列一次設定
-  var i = 0;
-  while (i < n) {
-    var j = i;
-    while (j + 1 < n && heights[j + 1] === heights[i]) j++;
-    sheet.setRowHeightsForced(page.start + i, j - i + 1, heights[i]);
-    i = j + 1;
-  }
 }
 
 function showOnly_(sheet, page, lastCol) {
@@ -592,6 +576,17 @@ function setup() {
 
   var cfg = ensureSheet_(SHEET.CONFIG, ['項目', '值', '說明']);
   var obsolete = ['出貨單第一聯列', '出貨單第二聯列', '列印欄數', '出貨單PDF參數', '貨運單PDF參數', '出貨單列印設定', '貨運單列印設定', 'PDF字型'];
+  // 上一版預設字型 Noto Sans TC 會讓版面跑掉：只清除一次，之後使用者自己填的不再更動
+  var sp = PropertiesService.getScriptProperties();
+  if (!sp.getProperty('fontReset1')) {
+    for (var rf = 2; rf <= cfg.getLastRow(); rf++) {
+      var kf = cfg.getRange(rf, 1).getValue();
+      if ((kf === '出貨單字型' || kf === '貨運單字型') && cfg.getRange(rf, 2).getValue() === 'Noto Sans TC') {
+        cfg.getRange(rf, 2, 1, 2).setValues([['', '空白＝與模板相同（建議）。換字型可能讓字變高、版面跑掉；Google 產 PDF 無法使用微軟正黑體']]);
+      }
+    }
+    sp.setProperty('fontReset1', '1');
+  }
   // 舊版預設的貨運單欄數 10 改為 9（A～I）
   for (var rj = 2; rj <= cfg.getLastRow(); rj++) {
     if (cfg.getRange(rj, 1).getValue() === '貨運單列印欄數' && Number(cfg.getRange(rj, 2).getValue()) === 10) cfg.getRange(rj, 2, 1, 2).setValues([[9, 'A～I 欄']]);
