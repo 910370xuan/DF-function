@@ -562,7 +562,9 @@ var CONFIG_DEFAULTS = [
   ['貨運單列印欄數', 9, 'A～I 欄'],
   ['出貨單縮放比例', 68, '%；與 Google 試算表列印的「依分頁符號自動調整（68%）」相同'],
   ['貨運單縮放比例', 68, '%；貼紙對不準時微調，例如 67 或 69'],
-  ['PDF字型', '', '空白＝與原試算表相同；如果 PDF 的中文字型還是不對，可填 Noto Sans TC 強制指定'],
+  ['出貨單字型', 'Noto Sans TC', 'Google 產 PDF 只能用 Google 字型；Noto Sans TC（思源黑體）最接近微軟正黑體；空白＝不變'],
+  ['貨運單字型', 'Noto Sans TC', '同上'],
+  ['貨運單粗體', true, '貨運單文字全部加粗'],
   ['列印上下邊界', 0.75, '英吋；Google「標準」邊界＝上下 0.75'],
   ['水平對齊', '置中', '置中 或 靠左（與 Google 列印「格式設定 → 對齊 → 橫向」相同）'],
   ['列印左邊界', 0.7, '英吋；只有「靠左」時使用'],
@@ -741,6 +743,7 @@ function buildInvoices_(ss, groups, today, cfg, tmpSheets) {
     freezeCrossSheet_(tmp, lastRow, tmp.getLastColumn()); // 含 N3 價格組合
 
     var s = tmp.copyTo(out).setName((i + 1) + '_' + g.store);
+    applyFont_(s, page, lastCol, cfg['出貨單字型'], false);
     showOnly_(s, page, lastCol);
   });
   dropDefaultSheet_(out);
@@ -765,6 +768,7 @@ function buildLabels_(ss, stores, cfg, tmpSheets) {
     freezeCrossSheet_(tmp, lastRow, tmp.getLastColumn());
     for (var p = 0; p < Core.labelPagesFor(chunk.length); p++) {
       var s = tmp.copyTo(out).setName('標籤_' + (ci * 2 + p + 1));
+      applyFont_(s, pages[p], lastCol, cfg['貨運單字型'], truthy_(cfg['貨運單粗體']));
       showOnly_(s, pages[p], lastCol);
     }
   });
@@ -825,9 +829,14 @@ function freezeCrossSheet_(sheet, lastRow, lastCol) {
 }
 
 /** 列印時只顯示指定列與欄（隱藏的列欄不會出現在 PDF）；列印範圍外的浮動圖片移除 */
+/** 只套用在產出的 PDF，不會改到模板 */
+function applyFont_(sheet, page, lastCol, font, bold) {
+  var rng = sheet.getRange(page.start, 1, page.end - page.start + 1, lastCol);
+  if (String(font || '').trim()) rng.setFontFamily(String(font).trim());
+  if (bold) rng.setFontWeight('bold');
+}
+
 function showOnly_(sheet, page, lastCol) {
-  var font = String(readConfig_()['PDF字型'] || '').trim();
-  if (font) sheet.getRange(page.start, 1, page.end - page.start + 1, lastCol).setFontFamily(font);
   sheet.getImages().forEach(function (img) {
     var a = img.getAnchorCell();
     if (a.getColumn() > lastCol || a.getRow() < page.start || a.getRow() > page.end) img.remove();
@@ -1084,7 +1093,7 @@ function setup() {
   });
 
   var cfg = ensureSheet_(SHEET.CONFIG, ['項目', '值', '說明']);
-  var obsolete = ['出貨單第一聯列', '出貨單第二聯列', '列印欄數', '出貨單PDF參數', '貨運單PDF參數', '出貨單列印設定', '貨運單列印設定'];
+  var obsolete = ['出貨單第一聯列', '出貨單第二聯列', '列印欄數', '出貨單PDF參數', '貨運單PDF參數', '出貨單列印設定', '貨運單列印設定', 'PDF字型'];
   // 舊版預設的貨運單欄數 10 改為 9（A～I）
   for (var rj = 2; rj <= cfg.getLastRow(); rj++) {
     if (cfg.getRange(rj, 1).getValue() === '貨運單列印欄數' && Number(cfg.getRange(rj, 2).getValue()) === 10) cfg.getRange(rj, 2, 1, 2).setValues([[9, 'A～I 欄']]);
@@ -1096,7 +1105,7 @@ function setup() {
   CONFIG_DEFAULTS.forEach(function (d) { if (existing.indexOf(d[0]) < 0) cfg.appendRow(d); });
   var keys = cfg.getRange(1, 1, cfg.getLastRow(), 1).getValues();
   keys.forEach(function (k, i) {
-    if ([SUPPLEMENT_KEY, '週六出貨', '試跑模式', 'AI判讀', '輸出Excel'].indexOf(k[0]) >= 0) cfg.getRange(i + 1, 2).insertCheckboxes();
+    if ([SUPPLEMENT_KEY, '週六出貨', '試跑模式', 'AI判讀', '輸出Excel', '貨運單粗體'].indexOf(k[0]) >= 0) cfg.getRange(i + 1, 2).insertCheckboxes();
     if (k[0] === '單據編號月份' || String(k[0]).indexOf('時間') >= 0) cfg.getRange(i + 1, 2).setNumberFormat('@');
   });
 
