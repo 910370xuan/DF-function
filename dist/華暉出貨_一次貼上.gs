@@ -553,6 +553,7 @@ var CONFIG_DEFAULTS = [
   ['當日截止時間', '16:00', '截止後不再詢問補單'],
   ['週六出貨', false, ''],
   ['10+1適用型號', 'GPB-2000,GPB-2000A,GPB-2000S,DCB-6000', '逗號分隔；空白代表所有型號'],
+  ['輸出Excel', true, '除了 PDF 之外，另存一份出貨單 Excel 檔'],
   ['出貨單列印列', '1-57', '第一聯＋第二聯印在同一頁（對應原本第 57 列的分頁符號）'],
   ['出貨單列印欄數', 9, 'A～I 欄'],
   ['出貨單清空欄位', 'B17,E17', '模板上手動輸入的欄位（折讓金額、已收金額），產單前清空；是公式則不動'],
@@ -586,6 +587,7 @@ function onOpen() {
     .addItem('立即處理 LINE 訊息', 'menuProcessLine')
     .addItem('設定金鑰（LINE／Claude）', 'menuSetKeys')
     .addItem('同步廠商清冊', 'syncVendors')
+    .addItem('清理產單暫存試算表', 'cleanupTempSheets')
     .addItem('初始化／修復工作表與排程', 'setup')
     .addToUi();
 }
@@ -637,6 +639,7 @@ function runBatch_(type, opts) {
   if (!lock.tryLock(30000)) return { ok: false, message: '另一個批次正在執行，請稍後再試' };
   var ss = SpreadsheetApp.getActive();
   var tmpSheets = [];
+  OUTPUT_TMP_ = [];
   try {
     var cfg = readConfig_();
     if (cfg['主檔試算表ID']) syncVendors();
@@ -664,7 +667,8 @@ function runBatch_(type, opts) {
       g.orderNo = r.orderNo; state = r.state;
     });
 
-    var folder = cfg['輸出資料夾ID'] ? DriveApp.getFolderById(cfg['輸出資料夾ID']) : DriveApp.getRootFolder();
+    var base = cfg['輸出資料夾ID'] ? DriveApp.getFolderById(cfg['輸出資料夾ID']) : DriveApp.getRootFolder();
+    var folder = subfolder_(base, today.slice(0, 7)); // 每月一個資料夾，例如 2026-11
     var invSS = buildInvoices_(ss, built.groups, today, cfg, tmpSheets);
     var lblSS = buildLabels_(ss, built.groups.map(function (g) { return g.store; }), cfg, tmpSheets);
 
@@ -673,9 +677,7 @@ function runBatch_(type, opts) {
     var lblParams = printParams_(mustSheet_(SHEET.LABEL), Number(cfg['貨運單列印欄數']) || 9, cfg['貨運單縮放比例'], cfg);
     var invPdf = folder.createFile(exportBlob_(invSS.getId(), 'pdf', invParams).setName('出貨單_' + name + '.pdf'));
     var lblPdf = folder.createFile(exportBlob_(lblSS.getId(), 'pdf', lblParams).setName('貨運單_' + name + '.pdf'));
-    var invXlsx = folder.createFile(exportBlob_(invSS.getId(), 'xlsx', '').setName('出貨單_' + name + '.xlsx'));
-    DriveApp.getFileById(invSS.getId()).moveTo(folder);
-    DriveApp.getFileById(lblSS.getId()).moveTo(folder);
+    var invXlsx = truthy_(cfg['輸出Excel']) ? folder.createFile(exportBlob_(invSS.getId(), 'xlsx', '').setName('出貨單_' + name + '.xlsx')) : null;
 
     // 全部成功才寫回：編號、訂單狀態、批次紀錄
     setConfig_('單據編號月份', state.month);
@@ -684,7 +686,7 @@ function runBatch_(type, opts) {
     ss.getSheetByName(SHEET.BATCHES).appendRow([
       batchId, new Date(), type, built.groups.length,
       built.groups.map(function (g) { return g.orderNo; }).join(', '),
-      invPdf.getUrl(), lblPdf.getUrl(), invXlsx.getUrl(),
+      invPdf.getUrl(), lblPdf.getUrl(), invXlsx ? invXlsx.getUrl() : '',
       Session.getEffectiveUser().getEmail()
     ]);
 
@@ -696,6 +698,9 @@ function runBatch_(type, opts) {
     throw err;
   } finally {
     tmpSheets.forEach(function (s) { try { ss.deleteSheet(s); } catch (e) { /* 已刪除 */ } });
+    // 產 PDF 用的暫存試算表用完就丟進垃圾桶（30 天內可從垃圾桶還原）
+    OUTPUT_TMP_.forEach(function (id) { try { DriveApp.getFileById(id).setTrashed(true); } catch (e) { /* 已刪除 */ } });
+    OUTPUT_TMP_ = [];
     lock.releaseLock();
   }
 }
@@ -769,8 +774,11 @@ function buildLabels_(ss, stores, cfg, tmpSheets) {
  * 產單用的新試算表：地區設定、時區、主題字型都跟原本的試算表一樣。
  * 新建的試算表預設地區可能不是台灣，中文字會被換成別的字型，所以要先對齊。
  */
+var OUTPUT_TMP_ = [];
+
 function newOutput_(ss, name) {
   var out = SpreadsheetApp.create(name);
+  OUTPUT_TMP_.push(out.getId());
   out.setSpreadsheetLocale(ss.getSpreadsheetLocale());
   out.setSpreadsheetTimeZone(ss.getSpreadsheetTimeZone());
   try {
@@ -781,6 +789,23 @@ function newOutput_(ss, name) {
     }
   } catch (e) { /* 主題不支援時沿用預設 */ }
   return out;
+}
+
+function subfolder_(parent, name) {
+  var it = parent.getFoldersByName(name);
+  return it.hasNext() ? it.next() : parent.createFolder(name);
+}
+
+/** 清掉之前版本留下的產單暫存試算表（只比對系統產生的檔名格式） */
+function cleanupTempSheets() {
+  var re = /^(出貨單_\d{4}-\d{2}-\d{2}_\d{10,}|貨運單_\d{10,})$/;
+  var it = DriveApp.searchFiles("mimeType = 'application/vnd.google-apps.spreadsheet' and trashed = false and 'me' in owners and (title contains '出貨單_' or title contains '貨運單_')");
+  var n = 0;
+  while (it.hasNext()) {
+    var f = it.next();
+    if (re.test(f.getName())) { f.setTrashed(true); n++; }
+  }
+  showResult_({ message: '已把 ' + n + ' 個暫存試算表移到垃圾桶（30 天內可還原）。PDF 與 Excel 檔不受影響。' });
 }
 
 /** 只把引用其他工作表（廠商清冊）的公式轉成值；同表公式（價格、聯單、圖片）保留 */
@@ -1062,7 +1087,7 @@ function setup() {
   CONFIG_DEFAULTS.forEach(function (d) { if (existing.indexOf(d[0]) < 0) cfg.appendRow(d); });
   var keys = cfg.getRange(1, 1, cfg.getLastRow(), 1).getValues();
   keys.forEach(function (k, i) {
-    if ([SUPPLEMENT_KEY, '週六出貨', '試跑模式', 'AI判讀'].indexOf(k[0]) >= 0) cfg.getRange(i + 1, 2).insertCheckboxes();
+    if ([SUPPLEMENT_KEY, '週六出貨', '試跑模式', 'AI判讀', '輸出Excel'].indexOf(k[0]) >= 0) cfg.getRange(i + 1, 2).insertCheckboxes();
     if (k[0] === '單據編號月份' || String(k[0]).indexOf('時間') >= 0) cfg.getRange(i + 1, 2).setNumberFormat('@');
   });
 
