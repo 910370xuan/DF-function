@@ -46,7 +46,9 @@ var CONFIG_DEFAULTS = [
   ['貨運單縮放比例', 68, '%；貼紙對不準時微調，例如 67 或 69'],
   ['PDF字型', '', '空白＝與原試算表相同；如果 PDF 的中文字型還是不對，可填 Noto Sans TC 強制指定'],
   ['列印上下邊界', 0.75, '英吋；Google「標準」邊界＝上下 0.75'],
-  ['列印左邊界', 0.7, '英吋；Google「標準」邊界＝左右 0.7；貼紙整體偏左就加大、偏右就減小'],
+  ['水平對齊', '置中', '置中 或 靠左（與 Google 列印「格式設定 → 對齊 → 橫向」相同）'],
+  ['列印左邊界', 0.7, '英吋；只有「靠左」時使用'],
+  ['水平微調', 0, '英吋；置中時整體往右移（正數）或往左移（負數），貼紙對位微調用'],
   [SUPPLEMENT_KEY, false, '勾選後立即產生補單（手機也可以）'],
   ['試跑模式', true, 'LINE 訂單寫到「LINE試跑」，不會產單；確認準確後取消勾選，改寫入出貨清單'],
   ['合併等待分鐘', 10, '客戶停止傳訊幾分鐘後，把連續訊息合併成一段處理'],
@@ -328,12 +330,19 @@ function printParams_(tplSheet, lastCol, pct, cfg) {
   var scale = (Number(pct) || 68) / 100;
   var tb = Number(cfg['列印上下邊界']);
   if (isNaN(tb)) tb = 0.75;
-  var left = Number(cfg['列印左邊界']);
-  if (isNaN(left)) left = 0.7;
-  var right = 8.27 - left - px * scale / 96;
-  if (right < 0) throw new Error('縮放 ' + pct + '% 時內容比紙寬，請調小縮放比例或左邊界');
+  var contentW = px * scale / 96; // 縮放後內容寬度（英吋）
+  var left;
+  if (String(cfg['水平對齊']).trim() === '靠左') {
+    left = Number(cfg['列印左邊界']);
+    if (isNaN(left)) left = 0.7;
+  } else {
+    // 置中：左右留白相同，再加上微調
+    left = (8.27 - contentW) / 2 + (Number(cfg['水平微調']) || 0);
+  }
+  var right = 8.27 - left - contentW;
+  if (left < 0 || right < 0) throw new Error('縮放 ' + pct + '% 時內容超出紙張，請調小縮放比例或水平微調');
   return 'size=A4&portrait=true&scale=2&top_margin=' + tb + '&bottom_margin=' + tb +
-    '&left_margin=' + left + '&right_margin=' + right.toFixed(3) + '&horizontal_alignment=LEFT&vertical_alignment=TOP';
+    '&left_margin=' + left.toFixed(3) + '&right_margin=' + right.toFixed(3) + '&horizontal_alignment=CENTER&vertical_alignment=TOP';
 }
 
 function exportBlob_(ssId, format, params) {
