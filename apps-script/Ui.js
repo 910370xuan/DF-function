@@ -15,26 +15,50 @@ var STATUS_COLORS = {
 };
 var HEADER_BG = '#1f4e9c';
 
-function menuFormatSheets() { formatSheets_(); showResult_({ message: '表格外觀已整理' }); }
+var FONT_SIZE = 12;        // 內容
+var HEADER_FONT_SIZE = 13; // 標題列
 
+function menuFormatSheets() { showResult_({ message: formatSheets_().join('\n') }); }
+
+/** 每一步各自執行並回報結果 */
 function formatSheets_() {
   var ss = SpreadsheetApp.getActive();
-  [SHEET.ORDERS, LINE_SHEET.TRIAL].forEach(function (name) {
-    var sh = ss.getSheetByName(name);
-    if (sh) formatOrderSheet_(sh, name === SHEET.ORDERS);
+  var results = [];
+  var step = function (name, fn) {
+    try { fn(); results.push('✅ ' + name); }
+    catch (e) { results.push('❌ ' + name + '：' + (e && e.message || e)); console.error(name, e && e.stack || e); }
+  };
+  step('出貨清單', function () { var sh = ss.getSheetByName(SHEET.ORDERS); if (sh) formatOrderSheet_(sh, true); });
+  step('LINE試跑', function () { var sh = ss.getSheetByName(LINE_SHEET.TRIAL); if (sh) formatOrderSheet_(sh, false); });
+  step('LINE帳號對照（店家下拉選單）', function () {
+    var sh = ss.getSheetByName(LINE_SHEET.BIND);
+    if (!sh) return;
+    formatSimple_(sh, { 1: 60, 2: 200, 3: 240, 4: 150, 5: 170, 6: 220 }, [1]);
+    sh.getRange(2, 3, sh.getMaxRows() - 1, 1).setDataValidation(SpreadsheetApp.newDataValidation()
+      .requireValueInRange(ss.getSheetByName(SHEET.VENDORS).getRange('C2:C'), true).setAllowInvalid(false)
+      .setHelpText('從廠商清冊選擇店家；找不到請先在主檔廠商清冊建檔').build()).setBackground('#fffbe6');
   });
-  formatSimple_(ss.getSheetByName(LINE_SHEET.BIND), { 1: 60, 2: 200, 3: 220, 4: 140, 5: 160, 6: 200 }, [1]);
-  formatSimple_(ss.getSheetByName(LINE_SHEET.LOG), { 1: 140, 2: 60, 3: 60, 4: 70, 5: 420, 6: 60, 7: 80, 8: 60, 9: 100 }, [2, 3, 6, 8]);
-  formatSimple_(ss.getSheetByName(SHEET.BATCHES), { 1: 110, 2: 140, 3: 70, 4: 70, 5: 260, 6: 120, 7: 120, 8: 120, 9: 160, 10: 120 }, []);
-  formatSimple_(ss.getSheetByName(SHEET.ALIASES), { 1: 180, 2: 160, 3: 140 }, []);
-  formatConfig_(ss.getSheetByName(SHEET.CONFIG));
-  buildOverview_();
-  arrangeTabs_();
+  step('型號對照（型號下拉選單）', function () {
+    var sh = ss.getSheetByName(SHEET.ALIASES);
+    if (!sh) return;
+    formatSimple_(sh, { 1: 200, 2: 180, 3: 150 }, []);
+    sh.getRange(2, 2, sh.getMaxRows() - 1, 1).setDataValidation(SpreadsheetApp.newDataValidation()
+      .requireValueInRange(ss.getSheetByName(SHEET.INVOICE).getRange('P3:P103'), true).setAllowInvalid(false).build());
+    sh.getRange(2, 3, sh.getMaxRows() - 1, 1).setDataValidation(SpreadsheetApp.newDataValidation()
+      .requireValueInList(['4', '8'], true).setAllowInvalid(true).build());
+  });
+  step('訊息紀錄', function () { formatSimple_(ss.getSheetByName(LINE_SHEET.LOG), { 1: 150, 2: 60, 3: 60, 4: 70, 5: 440, 6: 60, 7: 90, 8: 60, 9: 110 }, [2, 3, 6, 8]); });
+  step('批次紀錄', function () { formatSimple_(ss.getSheetByName(SHEET.BATCHES), { 1: 120, 2: 150, 3: 80, 4: 80, 5: 280, 6: 130, 7: 130, 8: 130, 9: 170, 10: 130 }, []); });
+  step('設定', function () { formatConfig_(ss.getSheetByName(SHEET.CONFIG)); });
+  step('總覽', buildOverview_);
+  step('分頁排序與模板保護', arrangeTabs_);
+  return results;
 }
 
 function headerStyle_(sh, n) {
-  sh.getRange(1, 1, 1, n).setFontWeight('bold').setFontColor('#ffffff').setBackground(HEADER_BG).setVerticalAlignment('middle');
-  sh.setRowHeight(1, 30);
+  sh.getRange(1, 1, sh.getMaxRows(), n).setFontSize(FONT_SIZE);
+  sh.getRange(1, 1, 1, n).setFontWeight('bold').setFontColor('#ffffff').setBackground(HEADER_BG).setVerticalAlignment('middle').setFontSize(HEADER_FONT_SIZE);
+  sh.setRowHeight(1, 34);
   sh.setFrozenRows(1);
 }
 
@@ -46,7 +70,7 @@ function formatOrderSheet_(sh, isOrders) {
   ORDER_HEADERS.forEach(function (h, i) { if (widths[h]) sh.setColumnWidth(i + 1, widths[h]); });
   var rows = sh.getMaxRows() - 1;
   sh.getRange(2, COL['收單時間'] + 1, rows, 1).setNumberFormat('mm/dd hh:mm');
-  sh.getRange(2, COL['系統訊息'] + 1, rows, 1).setWrap(true).setFontSize(9).setFontColor('#5b6676');
+  sh.getRange(2, COL['系統訊息'] + 1, rows, 1).setWrap(true).setFontColor('#5b6676');
   sh.getRange(2, 1, rows, n).setVerticalAlignment('top');
   sh.getRange(2, COL['數量'] + 1, rows, 2).setHorizontalAlignment('center');
   // 內部用欄位收起來（資料還在，右鍵「取消隱藏」可看）
@@ -91,7 +115,7 @@ function formatConfig_(sh) {
   var n = sh.getLastRow() - 1;
   if (n < 1) return;
   var keys = sh.getRange(2, 1, n, 1).getValues();
-  sh.getRange(2, 3, n, 1).setFontColor('#6b7280').setWrap(true).setFontSize(9);
+  sh.getRange(2, 3, n, 1).setFontColor('#6b7280').setWrap(true);
   keys.forEach(function (k, i) {
     var common = CONFIG_COMMON.indexOf(k[0]) >= 0;
     sh.getRange(i + 2, 1, 1, 2).setBackground(common ? '#e6eefb' : null).setFontWeight(common ? 'bold' : 'normal');
@@ -119,8 +143,10 @@ function buildOverview_() {
     ['', '']
   ];
   sh.getRange(1, 1, cells.length, 2).setValues(cells);
-  sh.getRange('A1').setFontSize(18).setFontWeight('bold').setFontColor(HEADER_BG);
-  sh.getRange('A4:B8').setFontSize(12);
+  sh.getRange('A1:G60').setFontSize(FONT_SIZE);
+  sh.getRange('A1').setFontSize(20).setFontWeight('bold').setFontColor(HEADER_BG);
+  sh.getRange('A2:B2').setFontSize(14);
+  sh.getRange('A4:B8').setFontSize(14);
   sh.getRange('B4:B8').setFontWeight('bold').setHorizontalAlignment('center');
   sh.getRange('A4:B4').setBackground('#fff6e0');
   sh.getRange('A5:B5').setBackground('#eaf6ee');
@@ -129,7 +155,7 @@ function buildOverview_() {
   sh.setColumnWidth(7, 380);
 
   var q = function (row, title, formula) {
-    sh.getRange(row, 1).setValue(title).setFontWeight('bold').setFontSize(12).setFontColor(HEADER_BG);
+    sh.getRange(row, 1).setValue(title).setFontWeight('bold').setFontSize(14).setFontColor(HEADER_BG);
     sh.getRange(row + 1, 1).setFormula(formula);
   };
   var c = function (h) { return 'Col' + (COL[h] + 1); };

@@ -75,7 +75,7 @@ function onOpen() {
     .addItem('同步廠商清冊', 'syncVendors')
     .addItem('清理產單暫存試算表', 'cleanupTempSheets')
     .addItem('整理表格外觀', 'menuFormatSheets')
-    .addItem('初始化／修復工作表與排程', 'setup')
+    .addItem('初始化／修復工作表與排程', 'menuSetup')
     .addToUi();
 }
 
@@ -605,7 +605,26 @@ function runParseTest() {
 
 /* ───────────── 初始化 ───────────── */
 
+/**
+ * 初始化：每個步驟各自執行，某一步出錯也會繼續做完其他步驟，最後列出結果。
+ * 從 Apps Script 編輯器執行時，結果會顯示在下方「執行記錄」。
+ */
 function setup() {
+  var results = [];
+  var step = function (name, fn) {
+    try { fn(); results.push('✅ ' + name); }
+    catch (e) { results.push('❌ ' + name + '：' + (e && e.message || e)); console.error(name, e && e.stack || e); }
+  };
+  step('建立工作表、設定、排程', setupCore_);
+  formatSheets_().forEach(function (r) { results.push(r); });
+  var text = '版本：' + (typeof APP_VERSION !== 'undefined' ? APP_VERSION : '開發版') + '\n' + results.join('\n');
+  console.log(text);
+  return text;
+}
+
+function menuSetup() { showResult_({ message: setup() }); }
+
+function setupCore_() {
   var ss = SpreadsheetApp.getActive();
   ss.setSpreadsheetTimeZone(TZ);
   [SHEET.INVOICE, SHEET.LABEL, SHEET.VENDORS].forEach(function (n) {
@@ -689,7 +708,6 @@ function setup() {
   ScriptApp.getProjectTriggers().forEach(function (t) { ScriptApp.deleteTrigger(t); });
   ScriptApp.newTrigger('tick').timeBased().everyMinutes(5).create();
   ScriptApp.newTrigger('onEditInstalled').forSpreadsheet(ss).onEdit().create();
-  formatSheets_();
   return '完成';
 }
 
