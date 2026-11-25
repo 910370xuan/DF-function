@@ -125,7 +125,7 @@ function handleSegment_(seg, ctx, log) {
   var recvDate = fmtDate_(new Date(first.ts));
   var recvHm = Utilities.formatDate(new Date(first.ts), TZ, 'HH:mm');
 
-  var res = Parser.parse(text, { aliases: ctx.aliases, hasImage: images.length > 0, today: recvDate });
+  var res = Parser.parse(text, { aliases: ctx.aliases, hasImage: images.length > 0, today: recvDate, invoiceCombo: cfg['開發票價格組合'] });
   var mark = function (kindText) {
     seg.msgs.forEach(function (m) {
       log.getRange(m.row, LOG_COL['狀態'] + 1, 1, 3).setValues([['已處理', segId, kindText]]);
@@ -168,25 +168,89 @@ function handleSegment_(seg, ctx, log) {
     holidays: ctx.holidays, shipSaturday: truthy_(cfg['週六出貨']), cutoff: cfg['當日截止時間'],
     nearMinutes: Number(cfg['接近截止提醒分鐘'])
   });
+  if (res.shipDate) {
+    // 客戶指定日期：直接當出貨日；不合理才請客服確認
+    var sd = res.shipDate;
+    if (sd < recvDate) reasons.push('指定日期 ' + sd + ' 已經過了，請確認出貨日');
+    else if (!Core.isShippingDay(sd, ctx.holidays, truthy_(cfg['週六出貨']))) reasons.push('指定日期 ' + sd + ' 不是出貨日，請確認');
+    else if (sd === recvDate && ship.date !== recvDate) reasons.push('指定今天出貨，但已過 ' + cfg['當日截止時間'] + ' 截止，請確認');
+    ship = { date: sd, nearCutoff: sd === recvDate && ship.nearCutoff };
+  }
   if (ship.nearCutoff) reasons.push('接近 ' + cfg['當日截止時間'] + ' 截止，請確認今天是否來得及出貨');
 
-  var unclear = kind === 'unclear' || reasons.length > 0;
   var trial = truthy_(cfg['試跑模式']);
+  var target = ensureSheet_(trial ? LINE_SHEET.TRIAL : SHEET.ORDERS, ORDER_HEADERS);
+  var recvAt = new Date(first.ts);
+  var stamp = Utilities.formatDate(recvAt, TZ, 'MM/dd HH:mm');
+
+  // 改單／追加／取消：比對同一個 LINE 帳號還沒出貨的訂單
+  var prev = findOpenOrders_(target, seg.userId, segId, recvDate);
+  var mod = res.modification;
+  var implicit = false;
+  if (!mod && prev.pending.length && items.length) {
+    implicit = true; // 沒寫「改成」「再加」，但同一客戶已有未出貨的單
+    var oldProducts = prev.pending.map(function (p) { return p.product; });
+    mod = items.some(function (it) { return oldProducts.indexOf(it.product) >= 0; }) ? 'replace' : 'add';
+  }
+  if (mod === 'cancel') {
+    if (prev.pending.length) {
+      prev.pending.forEach(function (p) {
+        target.getRange(p.row, COL['狀態'] + 1).setValue('待確認');
+        target.getRange(p.row, COL['系統訊息'] + 1).setValue('⚠ 客戶 ' + stamp + ' 要求取消，確認後請把狀態改成「取消」\n' + p.sys);
+      });
+      mark('取消要求');
+      return 'unclear';
+    }
+    reasons.push('客戶要求取消，但找不到未產單的訂單' + (prev.printed.length ? '（可能已產單：' + prev.printed[0].batch + '）' : '') + '，請確認');
+  } else if (mod === 'replace') {
+    if (prev.pending.length) {
+      prev.pending.forEach(function (p) {
+        target.getRange(p.row, COL['狀態'] + 1).setValue('取消');
+        target.getRange(p.row, COL['系統訊息'] + 1).setValue('（已被 ' + stamp + ' 的改單取代）\n' + p.sys);
+      });
+      reasons.push((implicit ? '同一客戶又傳了訂單，判斷為改單' : '改單') + '：已依最新訊息更新、舊單已取消，請確認');
+    } else if (prev.printed.length) {
+      reasons.push('改單：原訂單已產單（批次 ' + prev.printed[0].batch + '），需重印出貨單，請確認');
+    } else {
+      reasons.push('改單：找不到原訂單，已當成新訂單，請確認');
+    }
+  } else if (mod === 'add') {
+    reasons.push((implicit ? '同一客戶又傳了訂單，判斷為追加' : '追加訂單') + '，原訂單保留，請確認');
+  }
+
+  var unclear = kind === 'unclear' || reasons.length > 0;
   var status = unclear ? '待確認' : (trial ? '建議' : '待出貨');
   var sys = (reasons.length ? '⚠ ' + unique_(reasons).join('；') + '\n' : '') + '原文：' + text.slice(0, 300) +
     (images.length ? '\n（含 ' + images.length + ' 張圖片）' : '');
-  var recvAt = new Date(first.ts);
   var shipText = ship.date.replace(/-/g, '/');
   var source = 'LINE|' + seg.userId + '|' + segId;
   var lines = items.length ? items : [{ product: '', qty: '', pin8: 0 }];
   var rows = lines.map(function (it) {
     return [Utilities.getUuid().slice(0, 8), recvAt, shipText, store, it.product, it.qty, it.pin8 || '', unique_(notes).join('/'),
-      status, '', '', source, sys, '', '', false];
+      status, '', '', source, sys, '', '', false, res.priceCombo || ''];
   });
-  var target = ensureSheet_(trial ? LINE_SHEET.TRIAL : SHEET.ORDERS, ORDER_HEADERS);
   target.getRange(target.getLastRow() + 1, 1, rows.length, ORDER_HEADERS.length).setValues(rows);
   mark(unclear ? '待確認' : '明確訂單');
   return unclear ? 'unclear' : 'order';
+}
+
+/** 同一 LINE 帳號、出貨日還沒到的訂單：未產單（可改）與已產單（需重印） */
+function findOpenOrders_(sh, userId, segId, today) {
+  var out = { pending: [], printed: [] };
+  if (sh.getLastRow() < 2) return out;
+  var data = sh.getRange(2, 1, sh.getLastRow() - 1, ORDER_HEADERS.length).getValues();
+  data.forEach(function (r, i) {
+    var src = String(r[COL['來源']]);
+    if (src.indexOf('LINE|' + userId + '|') !== 0 || src === 'LINE|' + userId + '|' + segId) return;
+    var d = r[COL['出貨日']];
+    var ds = isDate_(d) ? fmtDate_(d) : Core.normalizeDate(d);
+    if (ds && ds < today) return;
+    var item = { row: i + 2, product: r[COL['型號']], batch: r[COL['批次']], sys: String(r[COL['系統訊息']] || '') };
+    var st = r[COL['狀態']];
+    if (st === '建議' || st === '待確認' || st === '待出貨') out.pending.push(item);
+    else if (st === '已產單') out.printed.push(item);
+  });
+  return out;
 }
 
 function readBindings_() {

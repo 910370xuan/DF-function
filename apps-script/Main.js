@@ -17,7 +17,7 @@ var SHEET = {
 var ALIAS_HEADERS = ['客戶說法', '型號', 'pin（4 或 8，可空白）'];
 var PARSE_HEADERS = ['訊息（貼上客戶訊息）', '店家（可空白）', '有圖片', '判斷', '品項', '備註', '需確認原因', '上一筆訂單建議'];
 
-var ORDER_HEADERS = ['訂單ID', '收單時間', '出貨日', '店家', '型號', '數量', '8pin數', '附註', '狀態', '批次', '單據編號', '來源', '系統訊息', '折讓金額', '已收金額', '確認'];
+var ORDER_HEADERS = ['訂單ID', '收單時間', '出貨日', '店家', '型號', '數量', '8pin數', '附註', '狀態', '批次', '單據編號', '來源', '系統訊息', '折讓金額', '已收金額', '確認', '價格組合'];
 var COL = {}; ORDER_HEADERS.forEach(function (h, i) { COL[h] = i; });
 var STATUSES = ['待出貨', '待確認', '建議', '已產單', '已手打', '暫緩', '取消', '已出貨'];
 var BATCH_HEADERS = ['批次ID', '產生時間', '類型', '店家數', '單據編號', '出貨單PDF', '貨運單PDF', '出貨單Excel', '執行者', '貨運單Excel'];
@@ -35,9 +35,10 @@ var CONFIG_DEFAULTS = [
   ['當日截止時間', '16:00', '截止後不再詢問補單'],
   ['週六出貨', false, ''],
   ['10+1適用型號', 'GPB-2000,GPB-2000A,GPB-2000S,DCB-6000', '逗號分隔；空白代表所有型號'],
-  ['輸出Excel', true, '列印用 Excel 檔（出貨單、貨運單），已設定字型、A4、縮放比例、置中'],
+  ['輸出Excel', false, '另存 Excel 檔（出貨單、貨運單）；平常列印用 PDF 即可'],
   ['Excel字型', '微軟正黑體', 'Excel 列印檔使用的字型（在 Windows 的 Excel 開啟列印）'],
-  ['輸出PDF', true, '另存 PDF（手機查看或備份用；PDF 字型與模板相同，無法使用微軟正黑體）'],
+  ['輸出PDF', true, '列印用 PDF（A4、68%、置中）'],
+  ['開發票價格組合', 'D(稅外加)', '客戶訊息提到統編／發票時，這張單改用的價格組合'],
   ['出貨單列印列', '1-57', '第一聯＋第二聯印在同一頁（對應原本第 57 列的分頁符號）'],
   ['出貨單列印欄數', 9, 'A～I 欄'],
   ['出貨單清空欄位', 'B17,E17', '模板上手動輸入的欄位（折讓金額、已收金額），產單前清空；是公式則不動'],
@@ -140,6 +141,7 @@ function runBatch_(type, opts) {
       today: today,
       vendors: readVendorNames_(),
       products: readProducts_(),
+      combos: readCombos_(),
       eligible: splitList_(cfg['10+1適用型號'])
     });
     writeRowMessages_(orders, built.errors);
@@ -238,6 +240,7 @@ function buildInvoices_(ss, groups, today, cfg, tmpSheets) {
     tmp.getRange('H9:H15').setValues(h);
     SpreadsheetApp.flush();
     freezeCrossSheet_(tmp, lastRow, tmp.getLastColumn()); // 含 N3 價格組合
+    if (g.priceCombo) { tmp.getRange('N3').setValue(g.priceCombo); SpreadsheetApp.flush(); } // 這張單指定的價格組合（例如開發票）
 
     var s = tmp.copyTo(out).setName((i + 1) + '_' + g.store);
     freezeAll_(s, page, lastCol);
@@ -470,6 +473,7 @@ function readOrders_() {
       qty: r[COL['數量']],
       pin8: r[COL['8pin數']],
       note: String(r[COL['附註']] || '').trim(),
+      priceCombo: String(r[COL['價格組合']] || '').trim(),
       discount: r[COL['折讓金額']],
       paid: r[COL['已收金額']],
       status: String(r[COL['狀態']] || '').trim()
@@ -510,6 +514,11 @@ function markGenerated_(orders, groups, batchId) {
 function readVendorNames_() {
   var sh = mustSheet_(SHEET.VENDORS);
   return sh.getRange(2, 3, Math.max(sh.getLastRow() - 1, 1), 1).getValues()
+    .map(function (r) { return String(r[0]).trim(); }).filter(String);
+}
+
+function readCombos_() {
+  return mustSheet_(SHEET.INVOICE).getRange('O3:O103').getValues()
     .map(function (r) { return String(r[0]).trim(); }).filter(String);
 }
 
@@ -633,6 +642,13 @@ function setupCore_() {
 
   var cfg = ensureSheet_(SHEET.CONFIG, ['項目', '值', '說明']);
   var obsolete = ['出貨單第一聯列', '出貨單第二聯列', '列印欄數', '出貨單PDF參數', '貨運單PDF參數', '出貨單列印設定', '貨運單列印設定', 'PDF字型', '出貨單字型', '貨運單字型'];
+  // 改為只出 PDF：舊版預設勾選的「輸出Excel」取消一次
+  if (!PropertiesService.getScriptProperties().getProperty('pdfOnly1')) {
+    for (var rx = 2; rx <= cfg.getLastRow(); rx++) {
+      if (cfg.getRange(rx, 1).getValue() === '輸出Excel') cfg.getRange(rx, 2, 1, 2).setValues([[false, '另存 Excel 檔（出貨單、貨運單）；平常列印用 PDF 即可']]);
+    }
+    PropertiesService.getScriptProperties().setProperty('pdfOnly1', '1');
+  }
   // 上一版預設字型 Noto Sans TC 會讓版面跑掉：只清除一次，之後使用者自己填的不再更動
   var sp = PropertiesService.getScriptProperties();
   if (!sp.getProperty('fontReset1')) {
@@ -676,6 +692,9 @@ function setupCore_() {
     .requireValueInRange(ss.getSheetByName(SHEET.VENDORS).getRange('C2:C'), true).setAllowInvalid(false).build());
   orders.getRange(2, COL['型號'] + 1, maxR, 1).setDataValidation(SpreadsheetApp.newDataValidation()
     .requireValueInRange(ss.getSheetByName(SHEET.INVOICE).getRange('P3:P103'), true).setAllowInvalid(false).build());
+  orders.getRange(2, COL['價格組合'] + 1, maxR, 1).setDataValidation(SpreadsheetApp.newDataValidation()
+    .requireValueInRange(ss.getSheetByName(SHEET.INVOICE).getRange('O3:O103'), true).setAllowInvalid(false)
+    .setHelpText('空白＝用廠商清冊的價格組合；要開發票選 D(稅外加)').build());
   orders.getRange(2, COL['狀態'] + 1, maxR, 1).setDataValidation(SpreadsheetApp.newDataValidation()
     .requireValueInList(STATUSES, true).setAllowInvalid(false).build());
   orders.setFrozenRows(1);
@@ -721,7 +740,7 @@ function notify_(subject, html, attachments) {
 function summaryHtml_(built, batchId, url) {
   var warn = built.groups.filter(function (g) { return g.duplicateVendor; })
     .map(function (g) { return '<li>' + esc_(g.store) + '：廠商清冊有同名店家，已套用第一筆資料，請核對</li>'; }).join('');
-  return '<p>批次 ' + batchId + '，附件為出貨單與貨運單。<b>列印請用 Excel 檔</b>（已設定微軟正黑體、A4、縮放比例與置中，用 Excel 開啟後直接列印「整本活頁簿」）；PDF 供手機查看或備份。</p>' +
+  return '<p>批次 ' + batchId + '，附件為出貨單與貨運單 PDF，列印時請選「實際大小／100%」。</p>' +
     groupsTable_(built.groups) + (warn ? '<p>⚠ 請注意：</p><ul>' + warn + '</ul>' : '') +
     errorsHtml_(built.errors) + '<p><a href="' + url + '">開啟華暉出貨自動化</a></p>';
 }

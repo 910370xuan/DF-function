@@ -20,15 +20,18 @@ var Parser = (function () {
   /** 只說「小電池」「小電」或只說 10+1：要查上一筆訂單 */
   var VAGUE_WORDS = ['小電池', '小電', '電池', '老樣子', '同上次', '一樣'];
   var UNIT = '(?:顆|個|組|台|付|副|入|pcs|PCS|片)?';
+  // 只有真的需要人判斷的才列為待確認原因
   var SPECIAL_PATTERNS = [
-    [/下週|下周|下禮拜|禮拜[一二三四五六日天]|星期[一二三四五六日天]|週[一二三四五六日]|明天|後天|今天|\d{1,2}\s*[\/月]\s*\d{1,2}/, '有指定日期'],
-    [/中午|上午|下午|晚上|早上|\d{1,2}\s*點|營業後|之後送|再送|後送|先不要|延後/, '有指定時間或送貨要求'],
-    [/統編|發票|收據/, '要統編或發票'],
-    [/記帳|下個月帳|月結|月底結|賒/, '帳務備註'],
-    [/取消|不要了|改成|改為|更正|修改|換成|追加|多加|再加|加訂/, '改單或追加'],
+    [/先不要|延後|暫停|晚點再寄|等我通知/, '要求延後出貨'],
     [/還沒收到|沒收到|少寄|寄錯|退貨|換貨|瑕疵|壞/, '客訴或售後']
   ];
-  var NO_TOOL = /(不需|不用|不要|免)(要)?(帶)?(小電池)?工具(組)?/g;
+  var INVOICE_RE = /統編|發票|收據/;
+  var ACCOUNT_RE = /(記[^，,。\s]{0,6}帳|下個月帳|月結|月底結|賒帳)/;
+  var MOD_REPLACE = /改成|改為|更正|修改|換成|改一下|修正/;
+  var MOD_ADD = /追加|多加|再加|加訂|另外再/;
+  var MOD_CANCEL = /取消|不要了|先取消/;
+  var WEEKDAY = { '一': 1, '二': 2, '三': 3, '四': 4, '五': 5, '六': 6, '日': 7, '天': 7 };
+  var VAGUE_DATE = /月底|月初|過幾天|改天|之後再|下週(?![一二三四五六日天])|下周(?![一二三四五六日天])|下禮拜(?![一二三四五六日天])|下星期(?![一二三四五六日天])/;  var NO_TOOL = /(不需|不用|不要|免)(要)?(帶)?(小電池)?工具(組)?/g;
 
   function normalize(text) {
     return String(text || '')
@@ -151,6 +154,22 @@ var Parser = (function () {
     });
 
     SPECIAL_PATTERNS.forEach(function (p) { if (p[0].test(raw)) reasons.push(p[1]); });
+
+    // 指定日期：能判斷就直接當出貨日，不能判斷才請客服確認
+    var shipDate = '';
+    if (opts.today) {
+      var d = extractDate(raw, opts.today);
+      if (d.date) shipDate = d.date;
+      else if (d.ambiguous) reasons.push('有指定日期但無法判斷（' + d.text + '），請確認出貨日');
+    }
+    // 統編發票：價格組合改用開發票的組合
+    var priceCombo = INVOICE_RE.test(raw) ? (opts.invoiceCombo || 'D(稅外加)') : '';
+    if (priceCombo) notes.push('開發票');
+    // 帳務：原文寫進附註
+    var acc = String(text || '').match(ACCOUNT_RE);
+    if (acc) notes.push(acc[1]);
+    // 改單類型：交給呼叫端比對同一客戶未出貨的訂單
+    var modification = MOD_CANCEL.test(raw) && !merged.length ? 'cancel' : MOD_REPLACE.test(raw) ? 'replace' : MOD_ADD.test(raw) ? 'add' : '';
     if (noTool) notes.push('不需工具');
     if (opts.hasImage) reasons.push('含圖片，需人工看圖');
     if (vagueQty) reasons.push('沒寫型號（' + vagueQty + ' 個），需查上一筆訂單');
@@ -162,7 +181,9 @@ var Parser = (function () {
     // 沒有任何品項、只是客訴或閒聊的訊息不列為訂單
     if (kind === 'unclear' && !merged.length && !vagueQty && !opts.hasImage && !mentioned) kind = 'not_order';
 
-    return { kind: kind, items: merged, notes: notes, reasons: unique(reasons), vague: vagueQty ? { qty: vagueQty } : null };
+    if (modification === 'cancel' && kind === 'not_order') kind = 'unclear';
+    return { kind: kind, items: merged, notes: unique(notes), reasons: unique(reasons), vague: vagueQty ? { qty: vagueQty } : null,
+      shipDate: shipDate, priceCombo: priceCombo, modification: modification };
   }
 
   /** 從歷史訂單找這家店最近一次的電池類品項，給「小電池」「幫我出10+1」當建議 */
@@ -171,6 +192,49 @@ var Parser = (function () {
     var rows = (history || []).filter(function (h) { return h.store === store && h.product && !exclude.test(h.product); });
     rows.sort(function (a, b) { return String(b.date).localeCompare(String(a.date)); });
     return rows.length ? { product: rows[0].product, qty: Number(rows[0].qty), date: rows[0].date } : null;
+  }
+
+  function ymd(y, m, d) {
+    var t = new Date(Date.UTC(y, m - 1, d));
+    return t.getUTCFullYear() + '-' + ('0' + (t.getUTCMonth() + 1)).slice(-2) + '-' + ('0' + t.getUTCDate()).slice(-2);
+  }
+
+  /**
+   * 從訊息找出指定的出貨日（today：'YYYY-MM-DD'）。
+   * 回傳 { date } 或 { ambiguous, text } 或 {}（沒有提到日期）。
+   */
+  function extractDate(raw, today) {
+    var t = today.split('-').map(Number);
+    var base = new Date(Date.UTC(t[0], t[1] - 1, t[2]));
+    var dow = base.getUTCDay() || 7; // 週一＝1 … 週日＝7
+    var found = [];
+    var add = function (n) { found.push(ymd(t[0], t[1], t[2] + n)); };
+    var m, re;
+    if (/今天/.test(raw)) add(0);
+    if (/明天/.test(raw)) add(1);
+    if (/後天/.test(raw) && !/明後天/.test(raw)) add(2);
+    re = /(下下|下|這|本)?(?:週|周|禮拜|星期)([一二三四五六日天])/g;
+    while ((m = re.exec(raw))) {
+      var w = WEEKDAY[m[2]];
+      var offset = m[1] === '下下' ? 14 : m[1] === '下' ? 7 : 0;
+      var n = w - dow + offset;
+      if (!m[1] && n < 0) n += 7; // 只說「禮拜五」且已過：下週五
+      add(n);
+    }
+    re = /(?:^|[^\d.\-])(\d{1,2})\s*(?:\/|月)\s*(\d{1,2})\s*(?:日|號)?(?![\dP])/g;
+    while ((m = re.exec(raw))) {
+      var mo = Number(m[1]), da = Number(m[2]);
+      if (mo < 1 || mo > 12 || da < 1 || da > 31) continue;
+      var y = t[0];
+      if (ymd(y, mo, da) < ymd(t[0], t[1], t[2] - 60)) y++; // 例：12 月說 1/5 → 明年
+      found.push(ymd(y, mo, da));
+    }
+    found = unique(found);
+    if (found.length === 1) return { date: found[0] };
+    if (found.length > 1) return { ambiguous: true, text: '提到多個日期' };
+    var v = raw.match(VAGUE_DATE);
+    if (v) return { ambiguous: true, text: v[0] };
+    return {};
   }
 
   /** 這家店最近 n 筆訂單（給 AI 當參考，不送整份歷史） */
@@ -209,7 +273,7 @@ var Parser = (function () {
   /** 新版才加入的對照，舊的「型號對照」工作表會自動補上 */
   var ADDED_ALIASES = ['小電池工具組', '工具組', '工具'];
 
-  return { DEFAULT_ALIASES: DEFAULT_ALIASES, ADDED_ALIASES: ADDED_ALIASES, recentFor: recentFor, suggestVendor: suggestVendor, normalize: normalize, parse: parse, suggestFromHistory: suggestFromHistory };
+  return { DEFAULT_ALIASES: DEFAULT_ALIASES, ADDED_ALIASES: ADDED_ALIASES, recentFor: recentFor, suggestVendor: suggestVendor, extractDate: extractDate, normalize: normalize, parse: parse, suggestFromHistory: suggestFromHistory };
 })();
 
 if (typeof module !== 'undefined') module.exports = Parser;

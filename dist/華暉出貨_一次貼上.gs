@@ -1,6 +1,6 @@
 /* 華暉出貨自動化：請整份貼進 Apps Script 的 Code.gs（取代原本內容）。由 scripts/bundle.js 產生，請勿手改。 */
 
-var APP_VERSION = '2026-11-23 10:00';
+var APP_VERSION = '2026-11-25 05:55';
 
 /**
  * 純邏輯（不呼叫任何 Google 服務），Apps Script 與 Node 測試共用。
@@ -66,6 +66,7 @@ var Core = (function () {
     rows.forEach(function (r) {
       if (r.status !== '待出貨') return;
       if (!r.shipDate || r.shipDate > opts.today) return;
+      opts_combos = opts.combos ? toSet(opts.combos) : null;
       var msg = validateRow(r, vendorSet, productSet);
       if (msg) { errors.push({ rowId: r.id, message: msg }); return; }
       if (!byStore[r.store]) { byStore[r.store] = []; order.push(r.store); }
@@ -86,6 +87,7 @@ var Core = (function () {
         store: store,
         duplicateVendor: !!dupVendors[store],
         rowIds: list.map(function (r) { return r.id; }),
+        priceCombo: (list.filter(function (r) { return r.priceCombo; })[0] || {}).priceCombo || '',
         discount: sumAmount(list, 'discount'),
         paid: sumAmount(list, 'paid'),
         lines: merged.map(function (m) {
@@ -130,6 +132,7 @@ var Core = (function () {
     return out.map(function (m) { return { product: m.product, qty: m.qty, pin8: m.pin8, note: m.notes.join('/') }; });
   }
 
+  var opts_combos = null;
   function validateRow(r, vendorSet, productSet) {
     if (!r.store) return '缺少店家';
     if (!vendorSet[r.store]) return '店家不在廠商清冊：' + r.store;
@@ -139,6 +142,7 @@ var Core = (function () {
     if (!(q > 0) || Math.floor(q) !== q) return '數量必須是正整數';
     var p8 = Number(r.pin8) || 0;
     if (p8 < 0 || p8 > q || Math.floor(p8) !== p8) return '8pin 數量不正確';
+    if (r.priceCombo && opts_combos && !opts_combos[r.priceCombo]) return '價格組合不在出貨單價格表：' + r.priceCombo;
     if (!isAmount(r.discount)) return '折讓金額必須是 0 以上的數字';
     if (!isAmount(r.paid)) return '已收金額必須是 0 以上的數字';
     return '';
@@ -354,15 +358,18 @@ var Parser = (function () {
   /** 只說「小電池」「小電」或只說 10+1：要查上一筆訂單 */
   var VAGUE_WORDS = ['小電池', '小電', '電池', '老樣子', '同上次', '一樣'];
   var UNIT = '(?:顆|個|組|台|付|副|入|pcs|PCS|片)?';
+  // 只有真的需要人判斷的才列為待確認原因
   var SPECIAL_PATTERNS = [
-    [/下週|下周|下禮拜|禮拜[一二三四五六日天]|星期[一二三四五六日天]|週[一二三四五六日]|明天|後天|今天|\d{1,2}\s*[\/月]\s*\d{1,2}/, '有指定日期'],
-    [/中午|上午|下午|晚上|早上|\d{1,2}\s*點|營業後|之後送|再送|後送|先不要|延後/, '有指定時間或送貨要求'],
-    [/統編|發票|收據/, '要統編或發票'],
-    [/記帳|下個月帳|月結|月底結|賒/, '帳務備註'],
-    [/取消|不要了|改成|改為|更正|修改|換成|追加|多加|再加|加訂/, '改單或追加'],
+    [/先不要|延後|暫停|晚點再寄|等我通知/, '要求延後出貨'],
     [/還沒收到|沒收到|少寄|寄錯|退貨|換貨|瑕疵|壞/, '客訴或售後']
   ];
-  var NO_TOOL = /(不需|不用|不要|免)(要)?(帶)?(小電池)?工具(組)?/g;
+  var INVOICE_RE = /統編|發票|收據/;
+  var ACCOUNT_RE = /(記[^，,。\s]{0,6}帳|下個月帳|月結|月底結|賒帳)/;
+  var MOD_REPLACE = /改成|改為|更正|修改|換成|改一下|修正/;
+  var MOD_ADD = /追加|多加|再加|加訂|另外再/;
+  var MOD_CANCEL = /取消|不要了|先取消/;
+  var WEEKDAY = { '一': 1, '二': 2, '三': 3, '四': 4, '五': 5, '六': 6, '日': 7, '天': 7 };
+  var VAGUE_DATE = /月底|月初|過幾天|改天|之後再|下週(?![一二三四五六日天])|下周(?![一二三四五六日天])|下禮拜(?![一二三四五六日天])|下星期(?![一二三四五六日天])/;  var NO_TOOL = /(不需|不用|不要|免)(要)?(帶)?(小電池)?工具(組)?/g;
 
   function normalize(text) {
     return String(text || '')
@@ -485,6 +492,22 @@ var Parser = (function () {
     });
 
     SPECIAL_PATTERNS.forEach(function (p) { if (p[0].test(raw)) reasons.push(p[1]); });
+
+    // 指定日期：能判斷就直接當出貨日，不能判斷才請客服確認
+    var shipDate = '';
+    if (opts.today) {
+      var d = extractDate(raw, opts.today);
+      if (d.date) shipDate = d.date;
+      else if (d.ambiguous) reasons.push('有指定日期但無法判斷（' + d.text + '），請確認出貨日');
+    }
+    // 統編發票：價格組合改用開發票的組合
+    var priceCombo = INVOICE_RE.test(raw) ? (opts.invoiceCombo || 'D(稅外加)') : '';
+    if (priceCombo) notes.push('開發票');
+    // 帳務：原文寫進附註
+    var acc = String(text || '').match(ACCOUNT_RE);
+    if (acc) notes.push(acc[1]);
+    // 改單類型：交給呼叫端比對同一客戶未出貨的訂單
+    var modification = MOD_CANCEL.test(raw) && !merged.length ? 'cancel' : MOD_REPLACE.test(raw) ? 'replace' : MOD_ADD.test(raw) ? 'add' : '';
     if (noTool) notes.push('不需工具');
     if (opts.hasImage) reasons.push('含圖片，需人工看圖');
     if (vagueQty) reasons.push('沒寫型號（' + vagueQty + ' 個），需查上一筆訂單');
@@ -496,7 +519,9 @@ var Parser = (function () {
     // 沒有任何品項、只是客訴或閒聊的訊息不列為訂單
     if (kind === 'unclear' && !merged.length && !vagueQty && !opts.hasImage && !mentioned) kind = 'not_order';
 
-    return { kind: kind, items: merged, notes: notes, reasons: unique(reasons), vague: vagueQty ? { qty: vagueQty } : null };
+    if (modification === 'cancel' && kind === 'not_order') kind = 'unclear';
+    return { kind: kind, items: merged, notes: unique(notes), reasons: unique(reasons), vague: vagueQty ? { qty: vagueQty } : null,
+      shipDate: shipDate, priceCombo: priceCombo, modification: modification };
   }
 
   /** 從歷史訂單找這家店最近一次的電池類品項，給「小電池」「幫我出10+1」當建議 */
@@ -505,6 +530,49 @@ var Parser = (function () {
     var rows = (history || []).filter(function (h) { return h.store === store && h.product && !exclude.test(h.product); });
     rows.sort(function (a, b) { return String(b.date).localeCompare(String(a.date)); });
     return rows.length ? { product: rows[0].product, qty: Number(rows[0].qty), date: rows[0].date } : null;
+  }
+
+  function ymd(y, m, d) {
+    var t = new Date(Date.UTC(y, m - 1, d));
+    return t.getUTCFullYear() + '-' + ('0' + (t.getUTCMonth() + 1)).slice(-2) + '-' + ('0' + t.getUTCDate()).slice(-2);
+  }
+
+  /**
+   * 從訊息找出指定的出貨日（today：'YYYY-MM-DD'）。
+   * 回傳 { date } 或 { ambiguous, text } 或 {}（沒有提到日期）。
+   */
+  function extractDate(raw, today) {
+    var t = today.split('-').map(Number);
+    var base = new Date(Date.UTC(t[0], t[1] - 1, t[2]));
+    var dow = base.getUTCDay() || 7; // 週一＝1 … 週日＝7
+    var found = [];
+    var add = function (n) { found.push(ymd(t[0], t[1], t[2] + n)); };
+    var m, re;
+    if (/今天/.test(raw)) add(0);
+    if (/明天/.test(raw)) add(1);
+    if (/後天/.test(raw) && !/明後天/.test(raw)) add(2);
+    re = /(下下|下|這|本)?(?:週|周|禮拜|星期)([一二三四五六日天])/g;
+    while ((m = re.exec(raw))) {
+      var w = WEEKDAY[m[2]];
+      var offset = m[1] === '下下' ? 14 : m[1] === '下' ? 7 : 0;
+      var n = w - dow + offset;
+      if (!m[1] && n < 0) n += 7; // 只說「禮拜五」且已過：下週五
+      add(n);
+    }
+    re = /(?:^|[^\d.\-])(\d{1,2})\s*(?:\/|月)\s*(\d{1,2})\s*(?:日|號)?(?![\dP])/g;
+    while ((m = re.exec(raw))) {
+      var mo = Number(m[1]), da = Number(m[2]);
+      if (mo < 1 || mo > 12 || da < 1 || da > 31) continue;
+      var y = t[0];
+      if (ymd(y, mo, da) < ymd(t[0], t[1], t[2] - 60)) y++; // 例：12 月說 1/5 → 明年
+      found.push(ymd(y, mo, da));
+    }
+    found = unique(found);
+    if (found.length === 1) return { date: found[0] };
+    if (found.length > 1) return { ambiguous: true, text: '提到多個日期' };
+    var v = raw.match(VAGUE_DATE);
+    if (v) return { ambiguous: true, text: v[0] };
+    return {};
   }
 
   /** 這家店最近 n 筆訂單（給 AI 當參考，不送整份歷史） */
@@ -543,7 +611,7 @@ var Parser = (function () {
   /** 新版才加入的對照，舊的「型號對照」工作表會自動補上 */
   var ADDED_ALIASES = ['小電池工具組', '工具組', '工具'];
 
-  return { DEFAULT_ALIASES: DEFAULT_ALIASES, ADDED_ALIASES: ADDED_ALIASES, recentFor: recentFor, suggestVendor: suggestVendor, normalize: normalize, parse: parse, suggestFromHistory: suggestFromHistory };
+  return { DEFAULT_ALIASES: DEFAULT_ALIASES, ADDED_ALIASES: ADDED_ALIASES, recentFor: recentFor, suggestVendor: suggestVendor, extractDate: extractDate, normalize: normalize, parse: parse, suggestFromHistory: suggestFromHistory };
 })();
 
 if (typeof module !== 'undefined') module.exports = Parser;
@@ -655,7 +723,7 @@ var SHEET = {
 var ALIAS_HEADERS = ['客戶說法', '型號', 'pin（4 或 8，可空白）'];
 var PARSE_HEADERS = ['訊息（貼上客戶訊息）', '店家（可空白）', '有圖片', '判斷', '品項', '備註', '需確認原因', '上一筆訂單建議'];
 
-var ORDER_HEADERS = ['訂單ID', '收單時間', '出貨日', '店家', '型號', '數量', '8pin數', '附註', '狀態', '批次', '單據編號', '來源', '系統訊息', '折讓金額', '已收金額', '確認'];
+var ORDER_HEADERS = ['訂單ID', '收單時間', '出貨日', '店家', '型號', '數量', '8pin數', '附註', '狀態', '批次', '單據編號', '來源', '系統訊息', '折讓金額', '已收金額', '確認', '價格組合'];
 var COL = {}; ORDER_HEADERS.forEach(function (h, i) { COL[h] = i; });
 var STATUSES = ['待出貨', '待確認', '建議', '已產單', '已手打', '暫緩', '取消', '已出貨'];
 var BATCH_HEADERS = ['批次ID', '產生時間', '類型', '店家數', '單據編號', '出貨單PDF', '貨運單PDF', '出貨單Excel', '執行者', '貨運單Excel'];
@@ -673,9 +741,10 @@ var CONFIG_DEFAULTS = [
   ['當日截止時間', '16:00', '截止後不再詢問補單'],
   ['週六出貨', false, ''],
   ['10+1適用型號', 'GPB-2000,GPB-2000A,GPB-2000S,DCB-6000', '逗號分隔；空白代表所有型號'],
-  ['輸出Excel', true, '列印用 Excel 檔（出貨單、貨運單），已設定字型、A4、縮放比例、置中'],
+  ['輸出Excel', false, '另存 Excel 檔（出貨單、貨運單）；平常列印用 PDF 即可'],
   ['Excel字型', '微軟正黑體', 'Excel 列印檔使用的字型（在 Windows 的 Excel 開啟列印）'],
-  ['輸出PDF', true, '另存 PDF（手機查看或備份用；PDF 字型與模板相同，無法使用微軟正黑體）'],
+  ['輸出PDF', true, '列印用 PDF（A4、68%、置中）'],
+  ['開發票價格組合', 'D(稅外加)', '客戶訊息提到統編／發票時，這張單改用的價格組合'],
   ['出貨單列印列', '1-57', '第一聯＋第二聯印在同一頁（對應原本第 57 列的分頁符號）'],
   ['出貨單列印欄數', 9, 'A～I 欄'],
   ['出貨單清空欄位', 'B17,E17', '模板上手動輸入的欄位（折讓金額、已收金額），產單前清空；是公式則不動'],
@@ -778,6 +847,7 @@ function runBatch_(type, opts) {
       today: today,
       vendors: readVendorNames_(),
       products: readProducts_(),
+      combos: readCombos_(),
       eligible: splitList_(cfg['10+1適用型號'])
     });
     writeRowMessages_(orders, built.errors);
@@ -876,6 +946,7 @@ function buildInvoices_(ss, groups, today, cfg, tmpSheets) {
     tmp.getRange('H9:H15').setValues(h);
     SpreadsheetApp.flush();
     freezeCrossSheet_(tmp, lastRow, tmp.getLastColumn()); // 含 N3 價格組合
+    if (g.priceCombo) { tmp.getRange('N3').setValue(g.priceCombo); SpreadsheetApp.flush(); } // 這張單指定的價格組合（例如開發票）
 
     var s = tmp.copyTo(out).setName((i + 1) + '_' + g.store);
     freezeAll_(s, page, lastCol);
@@ -1108,6 +1179,7 @@ function readOrders_() {
       qty: r[COL['數量']],
       pin8: r[COL['8pin數']],
       note: String(r[COL['附註']] || '').trim(),
+      priceCombo: String(r[COL['價格組合']] || '').trim(),
       discount: r[COL['折讓金額']],
       paid: r[COL['已收金額']],
       status: String(r[COL['狀態']] || '').trim()
@@ -1148,6 +1220,11 @@ function markGenerated_(orders, groups, batchId) {
 function readVendorNames_() {
   var sh = mustSheet_(SHEET.VENDORS);
   return sh.getRange(2, 3, Math.max(sh.getLastRow() - 1, 1), 1).getValues()
+    .map(function (r) { return String(r[0]).trim(); }).filter(String);
+}
+
+function readCombos_() {
+  return mustSheet_(SHEET.INVOICE).getRange('O3:O103').getValues()
     .map(function (r) { return String(r[0]).trim(); }).filter(String);
 }
 
@@ -1271,6 +1348,13 @@ function setupCore_() {
 
   var cfg = ensureSheet_(SHEET.CONFIG, ['項目', '值', '說明']);
   var obsolete = ['出貨單第一聯列', '出貨單第二聯列', '列印欄數', '出貨單PDF參數', '貨運單PDF參數', '出貨單列印設定', '貨運單列印設定', 'PDF字型', '出貨單字型', '貨運單字型'];
+  // 改為只出 PDF：舊版預設勾選的「輸出Excel」取消一次
+  if (!PropertiesService.getScriptProperties().getProperty('pdfOnly1')) {
+    for (var rx = 2; rx <= cfg.getLastRow(); rx++) {
+      if (cfg.getRange(rx, 1).getValue() === '輸出Excel') cfg.getRange(rx, 2, 1, 2).setValues([[false, '另存 Excel 檔（出貨單、貨運單）；平常列印用 PDF 即可']]);
+    }
+    PropertiesService.getScriptProperties().setProperty('pdfOnly1', '1');
+  }
   // 上一版預設字型 Noto Sans TC 會讓版面跑掉：只清除一次，之後使用者自己填的不再更動
   var sp = PropertiesService.getScriptProperties();
   if (!sp.getProperty('fontReset1')) {
@@ -1314,6 +1398,9 @@ function setupCore_() {
     .requireValueInRange(ss.getSheetByName(SHEET.VENDORS).getRange('C2:C'), true).setAllowInvalid(false).build());
   orders.getRange(2, COL['型號'] + 1, maxR, 1).setDataValidation(SpreadsheetApp.newDataValidation()
     .requireValueInRange(ss.getSheetByName(SHEET.INVOICE).getRange('P3:P103'), true).setAllowInvalid(false).build());
+  orders.getRange(2, COL['價格組合'] + 1, maxR, 1).setDataValidation(SpreadsheetApp.newDataValidation()
+    .requireValueInRange(ss.getSheetByName(SHEET.INVOICE).getRange('O3:O103'), true).setAllowInvalid(false)
+    .setHelpText('空白＝用廠商清冊的價格組合；要開發票選 D(稅外加)').build());
   orders.getRange(2, COL['狀態'] + 1, maxR, 1).setDataValidation(SpreadsheetApp.newDataValidation()
     .requireValueInList(STATUSES, true).setAllowInvalid(false).build());
   orders.setFrozenRows(1);
@@ -1359,7 +1446,7 @@ function notify_(subject, html, attachments) {
 function summaryHtml_(built, batchId, url) {
   var warn = built.groups.filter(function (g) { return g.duplicateVendor; })
     .map(function (g) { return '<li>' + esc_(g.store) + '：廠商清冊有同名店家，已套用第一筆資料，請核對</li>'; }).join('');
-  return '<p>批次 ' + batchId + '，附件為出貨單與貨運單。<b>列印請用 Excel 檔</b>（已設定微軟正黑體、A4、縮放比例與置中，用 Excel 開啟後直接列印「整本活頁簿」）；PDF 供手機查看或備份。</p>' +
+  return '<p>批次 ' + batchId + '，附件為出貨單與貨運單 PDF，列印時請選「實際大小／100%」。</p>' +
     groupsTable_(built.groups) + (warn ? '<p>⚠ 請注意：</p><ul>' + warn + '</ul>' : '') +
     errorsHtml_(built.errors) + '<p><a href="' + url + '">開啟華暉出貨自動化</a></p>';
 }
@@ -1541,7 +1628,7 @@ function handleSegment_(seg, ctx, log) {
   var recvDate = fmtDate_(new Date(first.ts));
   var recvHm = Utilities.formatDate(new Date(first.ts), TZ, 'HH:mm');
 
-  var res = Parser.parse(text, { aliases: ctx.aliases, hasImage: images.length > 0, today: recvDate });
+  var res = Parser.parse(text, { aliases: ctx.aliases, hasImage: images.length > 0, today: recvDate, invoiceCombo: cfg['開發票價格組合'] });
   var mark = function (kindText) {
     seg.msgs.forEach(function (m) {
       log.getRange(m.row, LOG_COL['狀態'] + 1, 1, 3).setValues([['已處理', segId, kindText]]);
@@ -1584,25 +1671,89 @@ function handleSegment_(seg, ctx, log) {
     holidays: ctx.holidays, shipSaturday: truthy_(cfg['週六出貨']), cutoff: cfg['當日截止時間'],
     nearMinutes: Number(cfg['接近截止提醒分鐘'])
   });
+  if (res.shipDate) {
+    // 客戶指定日期：直接當出貨日；不合理才請客服確認
+    var sd = res.shipDate;
+    if (sd < recvDate) reasons.push('指定日期 ' + sd + ' 已經過了，請確認出貨日');
+    else if (!Core.isShippingDay(sd, ctx.holidays, truthy_(cfg['週六出貨']))) reasons.push('指定日期 ' + sd + ' 不是出貨日，請確認');
+    else if (sd === recvDate && ship.date !== recvDate) reasons.push('指定今天出貨，但已過 ' + cfg['當日截止時間'] + ' 截止，請確認');
+    ship = { date: sd, nearCutoff: sd === recvDate && ship.nearCutoff };
+  }
   if (ship.nearCutoff) reasons.push('接近 ' + cfg['當日截止時間'] + ' 截止，請確認今天是否來得及出貨');
 
-  var unclear = kind === 'unclear' || reasons.length > 0;
   var trial = truthy_(cfg['試跑模式']);
+  var target = ensureSheet_(trial ? LINE_SHEET.TRIAL : SHEET.ORDERS, ORDER_HEADERS);
+  var recvAt = new Date(first.ts);
+  var stamp = Utilities.formatDate(recvAt, TZ, 'MM/dd HH:mm');
+
+  // 改單／追加／取消：比對同一個 LINE 帳號還沒出貨的訂單
+  var prev = findOpenOrders_(target, seg.userId, segId, recvDate);
+  var mod = res.modification;
+  var implicit = false;
+  if (!mod && prev.pending.length && items.length) {
+    implicit = true; // 沒寫「改成」「再加」，但同一客戶已有未出貨的單
+    var oldProducts = prev.pending.map(function (p) { return p.product; });
+    mod = items.some(function (it) { return oldProducts.indexOf(it.product) >= 0; }) ? 'replace' : 'add';
+  }
+  if (mod === 'cancel') {
+    if (prev.pending.length) {
+      prev.pending.forEach(function (p) {
+        target.getRange(p.row, COL['狀態'] + 1).setValue('待確認');
+        target.getRange(p.row, COL['系統訊息'] + 1).setValue('⚠ 客戶 ' + stamp + ' 要求取消，確認後請把狀態改成「取消」\n' + p.sys);
+      });
+      mark('取消要求');
+      return 'unclear';
+    }
+    reasons.push('客戶要求取消，但找不到未產單的訂單' + (prev.printed.length ? '（可能已產單：' + prev.printed[0].batch + '）' : '') + '，請確認');
+  } else if (mod === 'replace') {
+    if (prev.pending.length) {
+      prev.pending.forEach(function (p) {
+        target.getRange(p.row, COL['狀態'] + 1).setValue('取消');
+        target.getRange(p.row, COL['系統訊息'] + 1).setValue('（已被 ' + stamp + ' 的改單取代）\n' + p.sys);
+      });
+      reasons.push((implicit ? '同一客戶又傳了訂單，判斷為改單' : '改單') + '：已依最新訊息更新、舊單已取消，請確認');
+    } else if (prev.printed.length) {
+      reasons.push('改單：原訂單已產單（批次 ' + prev.printed[0].batch + '），需重印出貨單，請確認');
+    } else {
+      reasons.push('改單：找不到原訂單，已當成新訂單，請確認');
+    }
+  } else if (mod === 'add') {
+    reasons.push((implicit ? '同一客戶又傳了訂單，判斷為追加' : '追加訂單') + '，原訂單保留，請確認');
+  }
+
+  var unclear = kind === 'unclear' || reasons.length > 0;
   var status = unclear ? '待確認' : (trial ? '建議' : '待出貨');
   var sys = (reasons.length ? '⚠ ' + unique_(reasons).join('；') + '\n' : '') + '原文：' + text.slice(0, 300) +
     (images.length ? '\n（含 ' + images.length + ' 張圖片）' : '');
-  var recvAt = new Date(first.ts);
   var shipText = ship.date.replace(/-/g, '/');
   var source = 'LINE|' + seg.userId + '|' + segId;
   var lines = items.length ? items : [{ product: '', qty: '', pin8: 0 }];
   var rows = lines.map(function (it) {
     return [Utilities.getUuid().slice(0, 8), recvAt, shipText, store, it.product, it.qty, it.pin8 || '', unique_(notes).join('/'),
-      status, '', '', source, sys, '', '', false];
+      status, '', '', source, sys, '', '', false, res.priceCombo || ''];
   });
-  var target = ensureSheet_(trial ? LINE_SHEET.TRIAL : SHEET.ORDERS, ORDER_HEADERS);
   target.getRange(target.getLastRow() + 1, 1, rows.length, ORDER_HEADERS.length).setValues(rows);
   mark(unclear ? '待確認' : '明確訂單');
   return unclear ? 'unclear' : 'order';
+}
+
+/** 同一 LINE 帳號、出貨日還沒到的訂單：未產單（可改）與已產單（需重印） */
+function findOpenOrders_(sh, userId, segId, today) {
+  var out = { pending: [], printed: [] };
+  if (sh.getLastRow() < 2) return out;
+  var data = sh.getRange(2, 1, sh.getLastRow() - 1, ORDER_HEADERS.length).getValues();
+  data.forEach(function (r, i) {
+    var src = String(r[COL['來源']]);
+    if (src.indexOf('LINE|' + userId + '|') !== 0 || src === 'LINE|' + userId + '|' + segId) return;
+    var d = r[COL['出貨日']];
+    var ds = isDate_(d) ? fmtDate_(d) : Core.normalizeDate(d);
+    if (ds && ds < today) return;
+    var item = { row: i + 2, product: r[COL['型號']], batch: r[COL['批次']], sys: String(r[COL['系統訊息']] || '') };
+    var st = r[COL['狀態']];
+    if (st === '建議' || st === '待確認' || st === '待出貨') out.pending.push(item);
+    else if (st === '已產單') out.printed.push(item);
+  });
+  return out;
 }
 
 function readBindings_() {
@@ -1883,7 +2034,7 @@ function formatOrderSheet_(sh, isOrders) {
   var n = ORDER_HEADERS.length;
   headerStyle_(sh, n);
   var widths = { '訂單ID': 70, '收單時間': 120, '出貨日': 95, '店家': 170, '型號': 130, '數量': 55, '8pin數': 60, '附註': 140,
-    '狀態': 80, '批次': 95, '單據編號': 140, '來源': 60, '系統訊息': 360, '折讓金額': 80, '已收金額': 80, '確認': 55 };
+    '狀態': 80, '批次': 95, '單據編號': 140, '來源': 60, '系統訊息': 360, '折讓金額': 80, '已收金額': 80, '確認': 55, '價格組合': 110 };
   ORDER_HEADERS.forEach(function (h, i) { if (widths[h]) sh.setColumnWidth(i + 1, widths[h]); });
   var rows = sh.getMaxRows() - 1;
   sh.getRange(2, COL['收單時間'] + 1, rows, 1).setNumberFormat('mm/dd hh:mm');
@@ -1924,7 +2075,7 @@ function formatSimple_(sh, widths, hideCols) {
 }
 
 /** 設定：常用的放前面標成淺藍，進階的灰字 */
-var CONFIG_COMMON = ['通知Email', '單據編號月份', '單據編號最後流水號', SUPPLEMENT_KEY, '試跑模式', 'AI判讀', '主批次時間', '當日截止時間', '輸出Excel', '輸出PDF'];
+var CONFIG_COMMON = ['通知Email', '單據編號月份', '單據編號最後流水號', SUPPLEMENT_KEY, '試跑模式', 'AI判讀', '主批次時間', '當日截止時間', '輸出PDF', '開發票價格組合'];
 function formatConfig_(sh) {
   if (!sh) return;
   headerStyle_(sh, 3);

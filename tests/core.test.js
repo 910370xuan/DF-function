@@ -187,3 +187,14 @@ test('合併對話：安靜 10 分鐘才送出，強制時全部送出', () => {
   assert.deepStrictEqual(ready.map(r => [r.userId, r.msgs.map(x => x.text)]), [['A', ['我要叫貨', 'GPB-2000*3']]]);
   assert.strictEqual(Core.readySegments(m, now, 10 * 60e3, true).length, 2);
 });
+
+test('價格組合：同店任一列指定即套用；不在價格表退回', () => {
+  const rows = [
+    { id: 'a', shipDate: '2026-11-17', store: '格錸車業', product: 'GPB-2000', qty: 10, status: '待出貨' },
+    { id: 'b', shipDate: '2026-11-17', store: '格錸車業', product: 'DCB-6000', qty: 2, priceCombo: 'D(稅外加)', status: '待出貨' },
+    { id: 'c', shipDate: '2026-11-17', store: '麥斯二輪', product: 'GPB-2000', qty: 1, priceCombo: 'Z', status: '待出貨' }
+  ];
+  const { groups, errors } = Core.buildGroups(rows, { ...opts, combos: ['A', 'B', 'D(稅外加)'] });
+  assert.strictEqual(groups[0].priceCombo, 'D(稅外加)');
+  assert.deepStrictEqual(errors.map(e => e.rowId), ['c']);
+});

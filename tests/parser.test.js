@@ -47,12 +47,12 @@ test('麥斯：DCB-6000 換行 (4pin)*2 (8pin)*1', () => {
   assert.strictEqual(r.kind, 'order', r.reasons.join());
 });
 
-test('微霖：有統編發票與送貨時間 → 待確認', () => {
-  const r = p('好的~謝謝~那訂\n2000 x10\n4PIN 直流 x2\n需要開統編及發票，中午12點營業後送，謝謝');
+test('微霖：統編發票 → 價格組合 D(稅外加)；中午後送不標記', () => {
+  const r = p('好的~謝謝~那訂\n2000 x10\n4PIN 直流 x2\n需要開統編及發票，中午12點營業後送，謝謝', { today: '2026-11-05' });
   assert.deepStrictEqual(r.items, [{ product: 'GPB-2000', qty: 10, pin8: 0 }, { product: 'DCB-6000', qty: 2, pin8: 0 }]);
-  assert.strictEqual(r.kind, 'unclear');
-  assert.ok(r.reasons.includes('要統編或發票'));
-  assert.ok(r.reasons.includes('有指定時間或送貨要求'));
+  assert.strictEqual(r.kind, 'order', r.reasons.join());
+  assert.strictEqual(r.priceCombo, 'D(稅外加)');
+  assert.ok(r.notes.includes('開發票'));
 });
 
 test('微霖：詢問句不算訂單', () => {
@@ -73,11 +73,11 @@ test('麒鎮：小電10+1 → 查上一筆', () => {
   assert.deepStrictEqual(r.vague, { qty: 10 });
 });
 
-test('麒鎮：直流10+1 記下個月帳', () => {
+test('麒鎮：直流10+1 記下個月帳 → 附註，不用確認', () => {
   const r = p('直流10+1 記下個月帳');
   assert.deepStrictEqual(r.items, [{ product: 'DCB-6000', qty: 10, pin8: 0 }]);
-  assert.strictEqual(r.kind, 'unclear');
-  assert.ok(r.reasons.includes('帳務備註'));
+  assert.strictEqual(r.kind, 'order', r.reasons.join());
+  assert.deepStrictEqual(r.notes, ['記下個月帳']);
 });
 
 test('倫勝：圖片 + 我要一組這個', () => {
@@ -102,9 +102,34 @@ test('其他別名', () => {
   assert.deepStrictEqual(p('ＧＰＢ－２０００Ａ　＊３').items, [{ product: 'GPB-2000A', qty: 3, pin8: 0 }]);
 });
 
-test('訊息裡的日期若不是今天 → 視為指定日期', () => {
-  const r = p('2026/11/20 GPB-2000*3', { today: '2026-11-12' });
-  assert.ok(r.reasons.includes('有指定日期'));
+test('指定日期直接當出貨日', () => {
+  const T = '2026-11-25'; // 週三
+  const d = s => Parser.extractDate(Parser.normalize(s), T);
+  assert.deepStrictEqual(d('下週一再送'), { date: '2026-11-30' });
+  assert.deepStrictEqual(d('禮拜五出'), { date: '2026-11-27' });
+  assert.deepStrictEqual(d('禮拜一出'), { date: '2026-11-30' }); // 已過 → 下週一
+  assert.deepStrictEqual(d('明天幫我寄'), { date: '2026-11-26' });
+  assert.deepStrictEqual(d('12/3 再出'), { date: '2026-12-03' });
+  assert.deepStrictEqual(d('12月3號'), { date: '2026-12-03' });
+  assert.deepStrictEqual(d('GPB-2000*3'), {});
+  assert.deepStrictEqual(d('4/8pin 各一'), {});
+  assert.strictEqual(d('月底再寄').ambiguous, true);
+  assert.strictEqual(d('下週再寄').ambiguous, true);
+  assert.deepStrictEqual(Parser.extractDate('1/5', '2026-12-20'), { date: '2027-01-05' });
+  const r = p('GPB-2000*5 下週一再送', { today: T });
+  assert.strictEqual(r.shipDate, '2026-11-30');
+  assert.strictEqual(r.kind, 'order', r.reasons.join());
+  const r2 = p('2026/11/20 GPB-2000*3', { today: '2026-11-12' });
+  assert.strictEqual(r2.shipDate, '2026-11-20');
+});
+
+test('改單類型', () => {
+  assert.strictEqual(p('剛剛那筆改成 GPB-2000*5').modification, 'replace');
+  assert.strictEqual(p('再加 DCB-6000*2').modification, 'add');
+  const c = p('剛剛那筆先取消');
+  assert.strictEqual(c.modification, 'cancel');
+  assert.strictEqual(c.kind, 'unclear');
+  assert.strictEqual(p('GPB-2000*3').modification, '');
 });
 
 test('DCB pin 註記在數量後面', () => {

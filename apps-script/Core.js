@@ -62,6 +62,7 @@ var Core = (function () {
     rows.forEach(function (r) {
       if (r.status !== '待出貨') return;
       if (!r.shipDate || r.shipDate > opts.today) return;
+      opts_combos = opts.combos ? toSet(opts.combos) : null;
       var msg = validateRow(r, vendorSet, productSet);
       if (msg) { errors.push({ rowId: r.id, message: msg }); return; }
       if (!byStore[r.store]) { byStore[r.store] = []; order.push(r.store); }
@@ -82,6 +83,7 @@ var Core = (function () {
         store: store,
         duplicateVendor: !!dupVendors[store],
         rowIds: list.map(function (r) { return r.id; }),
+        priceCombo: (list.filter(function (r) { return r.priceCombo; })[0] || {}).priceCombo || '',
         discount: sumAmount(list, 'discount'),
         paid: sumAmount(list, 'paid'),
         lines: merged.map(function (m) {
@@ -126,6 +128,7 @@ var Core = (function () {
     return out.map(function (m) { return { product: m.product, qty: m.qty, pin8: m.pin8, note: m.notes.join('/') }; });
   }
 
+  var opts_combos = null;
   function validateRow(r, vendorSet, productSet) {
     if (!r.store) return '缺少店家';
     if (!vendorSet[r.store]) return '店家不在廠商清冊：' + r.store;
@@ -135,6 +138,7 @@ var Core = (function () {
     if (!(q > 0) || Math.floor(q) !== q) return '數量必須是正整數';
     var p8 = Number(r.pin8) || 0;
     if (p8 < 0 || p8 > q || Math.floor(p8) !== p8) return '8pin 數量不正確';
+    if (r.priceCombo && opts_combos && !opts_combos[r.priceCombo]) return '價格組合不在出貨單價格表：' + r.priceCombo;
     if (!isAmount(r.discount)) return '折讓金額必須是 0 以上的數字';
     if (!isAmount(r.paid)) return '已收金額必須是 0 以上的數字';
     return '';

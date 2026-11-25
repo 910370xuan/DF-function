@@ -66,7 +66,7 @@ function formatOrderSheet_(sh, isOrders) {
   var n = ORDER_HEADERS.length;
   headerStyle_(sh, n);
   var widths = { '訂單ID': 70, '收單時間': 120, '出貨日': 95, '店家': 170, '型號': 130, '數量': 55, '8pin數': 60, '附註': 140,
-    '狀態': 80, '批次': 95, '單據編號': 140, '來源': 60, '系統訊息': 360, '折讓金額': 80, '已收金額': 80, '確認': 55 };
+    '狀態': 80, '批次': 95, '單據編號': 140, '來源': 60, '系統訊息': 360, '折讓金額': 80, '已收金額': 80, '確認': 55, '價格組合': 110 };
   ORDER_HEADERS.forEach(function (h, i) { if (widths[h]) sh.setColumnWidth(i + 1, widths[h]); });
   var rows = sh.getMaxRows() - 1;
   sh.getRange(2, COL['收單時間'] + 1, rows, 1).setNumberFormat('mm/dd hh:mm');
@@ -107,7 +107,7 @@ function formatSimple_(sh, widths, hideCols) {
 }
 
 /** 設定：常用的放前面標成淺藍，進階的灰字 */
-var CONFIG_COMMON = ['通知Email', '單據編號月份', '單據編號最後流水號', SUPPLEMENT_KEY, '試跑模式', 'AI判讀', '主批次時間', '當日截止時間', '輸出Excel', '輸出PDF'];
+var CONFIG_COMMON = ['通知Email', '單據編號月份', '單據編號最後流水號', SUPPLEMENT_KEY, '試跑模式', 'AI判讀', '主批次時間', '當日截止時間', '輸出PDF', '開發票價格組合'];
 function formatConfig_(sh) {
   if (!sh) return;
   headerStyle_(sh, 3);
