@@ -59,3 +59,14 @@ test('Channel secret 前後有空白也能驗證；/check 只顯示是否設定'
   assert.match(chk, /FORWARD_SECRET：❌ 未設定/);
   assert.ok(!chk.includes(SECRET));
 });
+
+test('連線測試：分辨密鑰錯誤、存取權限、網址錯誤', async () => {
+  const { probeAppsScript } = await import('../worker/index.js');
+  const env = { GAS_URL: 'https://x/exec', FORWARD_SECRET: 's' };
+  const r = (body, status = 200) => async () => new Response(body, { status });
+  assert.match(await probeAppsScript(env, r('ok')), /✅/);
+  assert.match(await probeAppsScript(env, r('forbidden')), /轉送密鑰不符/);
+  assert.match(await probeAppsScript(env, r('<html>https://accounts.google.com/ServiceLogin</html>')), /所有人/);
+  assert.match(await probeAppsScript(env, r('Not Found', 404)), /網址錯誤/);
+  assert.match(await probeAppsScript({}, r('ok')), /GAS_URL 未設定/);
+});

@@ -25,6 +25,29 @@ export async function verifyLineSignature(rawBody, signature, channelSecret) {
   return diff === 0;
 }
 
+/**
+ * 送一次空事件到 Apps Script，看回應判斷哪裡有問題（不會產生任何資料）。
+ * Apps Script 會先回 302，跟著轉址才拿得到 doPost 的回應文字。
+ */
+export async function probeAppsScript(env, fetchImpl = fetch) {
+  const url = String(env.GAS_URL || '').trim();
+  if (!url) return '❌ GAS_URL 未設定';
+  try {
+    const res = await fetchImpl(url, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, redirect: 'follow',
+      body: JSON.stringify({ secret: String(env.FORWARD_SECRET || '').trim(), body: JSON.stringify({ events: [] }) })
+    });
+    const text = (await res.text()).trim();
+    if (text === 'ok') return '✅ Apps Script 正常（轉送密鑰正確）';
+    if (text === 'forbidden') return '❌ 轉送密鑰不符：FORWARD_SECRET 與試算表「設定金鑰」顯示的不同';
+    if (/accounts\.google\.com|ServiceLogin|登入|Sign in/i.test(text)) return '❌ Apps Script 部署的「誰可以存取」不是「所有人」，或網址不是最新部署';
+    if (res.status === 404 || /找不到|not found|無法開啟/i.test(text)) return '❌ GAS_URL 網址錯誤或該部署已刪除（HTTP ' + res.status + '）';
+    return '⚠ Apps Script 回應非預期（HTTP ' + res.status + '）：' + text.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').slice(0, 120);
+  } catch (e) {
+    return '❌ 連不到 Apps Script：' + (e && e.message);
+  }
+}
+
 export async function forward(env, rawBody, fetchImpl = fetch) {
   const payload = JSON.stringify({ secret: String(env.FORWARD_SECRET || '').trim(), body: rawBody });
   let lastErr;
@@ -59,6 +82,7 @@ export default {
         'GAS_URL：' + has('GAS_URL') + (env.GAS_URL && !/\/exec\s*$/.test(env.GAS_URL) ? '（⚠ 結尾應為 /exec）' : ''),
         'FORWARD_SECRET：' + has('FORWARD_SECRET')
       ];
+      lines.push('', '連線測試：' + await probeAppsScript(env));
       return new Response(lines.join('\n'), { headers: { 'content-type': 'text/plain; charset=utf-8' } });
     }
     if (request.method === 'GET') return new Response('ok');
