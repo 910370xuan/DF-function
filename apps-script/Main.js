@@ -15,7 +15,8 @@ var SHEET = {
   PARSE_TEST: '解析測試'
 };
 var ALIAS_HEADERS = ['客戶說法', '型號', 'pin（4 或 8，可空白）'];
-var PARSE_HEADERS = ['訊息（貼上客戶訊息）', '店家（可空白）', '有圖片', '判斷', '品項', '備註', '需確認原因', '上一筆訂單建議'];
+var PARSE_HEADERS = ['訊息（貼上客戶訊息）', '店家（可空白）', '有圖片', '判斷', '品項', '備註', '需確認原因', '上一筆訂單建議',
+  '正確答案（選填，例：GPB-2000A*10, DCB-6000*10, 8pin*2；4pin 與 8pin 分開寫）', '模型A', 'A判讀', 'A費用', '模型B', 'B判讀', 'B費用', '比對'];
 
 var ORDER_HEADERS = ['訂單ID', '收單時間', '出貨日', '店家', '型號', '數量', '8pin數', '附註', '狀態', '批次', '單據編號', '來源', '系統訊息', '折讓金額', '已收金額', '確認', '價格組合'];
 var COL = {}; ORDER_HEADERS.forEach(function (h, i) { COL[h] = i; });
@@ -67,6 +68,7 @@ var CONFIG_DEFAULTS = [
   ['AI判讀', false, '勾選後，規則判斷不了的訊息交給 Claude 判讀（需先設定金鑰）'],
   ['AI模型', 'claude-opus-5-5', '可改 claude-haiku-5-5（較便宜）'],
   ['AI思考強度', 'low', 'low / medium / high'],
+  ['AI比較模型', 'claude-haiku-5-5', '「AI 模型比較」時和「AI模型」一起比較的第二個模型'],
   ['AI每月上限美元', 5, '本月 AI 估計費用超過這個金額就停止呼叫，改由客服判斷；0＝不限制（費用明細見「AI使用紀錄」）']
 ];
 
@@ -81,6 +83,7 @@ function onOpen() {
     .addItem('立即處理 LINE 訊息', 'menuProcessLine')
     .addItem('設定金鑰（LINE／Claude）', 'menuSetKeys')
     .addItem('AI 連線測試', 'menuTestAi')
+    .addItem('AI 模型比較（解析測試的訊息）', 'menuCompareModels')
     .addItem('同步廠商清冊', 'syncVendors')
     .addItem('清理產單暫存試算表', 'cleanupTempSheets')
     .addItem('整理表格外觀', 'menuFormatSheets')
@@ -709,6 +712,57 @@ function suggestVague_(store, ctx) {
   return top ? { product: top, why: '這家店累計最常買的型號' } : null;
 }
 
+/** 把品項整理成可比對的文字：型號×數量（8pin n），依型號排序 */
+function itemsKey_(items) {
+  return (items || []).map(function (it) { return it.product + '×' + it.qty + (it.pin8 ? '(8pin' + it.pin8 + ')' : ''); }).sort().join(', ');
+}
+
+/**
+ * 解析測試表的每則訊息，分別交給兩個模型判讀，並與「正確答案」比對。
+ * 一次最多處理 15 則（避免超過執行時間），已有結果的列會略過；要重跑請清空 K～P 欄。
+ */
+function menuCompareModels() {
+  var cfg = readConfig_();
+  if (!PropertiesService.getScriptProperties().getProperty('ANTHROPIC_API_KEY')) { showResult_({ message: '請先用「設定金鑰」貼上 Claude 金鑰' }); return; }
+  var sh = ensureSheet_(SHEET.PARSE_TEST, PARSE_HEADERS);
+  sh.getRange(1, 1, 1, PARSE_HEADERS.length).setValues([PARSE_HEADERS]).setFontWeight('bold');
+  var n = sh.getLastRow() - 1;
+  if (n < 1) { showResult_({ message: '請先在「解析測試」A 欄貼上客戶訊息（一格一段），I 欄可填正確答案' }); return; }
+  var models = [String(cfg['AI模型'] || 'claude-opus-5-5').trim(), String(cfg['AI比較模型'] || 'claude-haiku-5-5').trim()];
+  var base = { aliases: readAliases_(), products: unique_(readProducts_()), history: null };
+  var data = sh.getRange(2, 1, n, PARSE_HEADERS.length).getValues();
+  var done = 0, score = [0, 0], graded = 0, cost = [0, 0], started = Date.now();
+  for (var i = 0; i < data.length && done < 15 && Date.now() - started < 270000; i++) {
+    var text = String(data[i][0]).trim();
+    if (!text || String(data[i][10]).trim()) continue;
+    var store = String(data[i][1]).trim();
+    var expected = String(data[i][8]).trim();
+    var expKey = expected ? itemsKey_(Parser.parse(expected, { aliases: base.aliases }).items) : '';
+    var out = [];
+    models.forEach(function (m, k) {
+      var c = Object.assign({}, base, { cfg: Object.assign({}, cfg, { 'AI模型': m }) });
+      var r = askClaude_(text, [], c, store);
+      if (r.error) { out.push(m, '❌ ' + r.error, ''); return; }
+      var key = itemsKey_(r.items);
+      cost[k] += r.cost;
+      out.push(r.model, (key || '（無品項）') + (r.concerns.length ? '\n疑點：' + r.concerns.join('；') : ''), Math.round(r.cost * 10000) / 10000);
+      if (expKey) { if (key === expKey) score[k]++; out[out.length - 2] = (key === expKey ? '✅ ' : '❌ ') + out[out.length - 2]; }
+    });
+    var verdict = expKey ? (out[1].indexOf('✅') === 0 ? 'A對' : 'A錯') + '／' + (out[4].indexOf('✅') === 0 ? 'B對' : 'B錯') : '（未填正確答案）';
+    if (expKey) graded++;
+    sh.getRange(i + 2, 10, 1, 7).setValues([out.concat([verdict])]);
+    done++;
+  }
+  sh.getRange(2, 11, n, 1).setWrap(true);
+  sh.getRange(2, 14, n, 1).setWrap(true);
+  var msg = '本次比較 ' + done + ' 則訊息\n\n' +
+    'A：' + models[0] + (graded ? '　答對 ' + score[0] + '/' + graded : '') + '　費用 US$' + cost[0].toFixed(4) + '\n' +
+    'B：' + models[1] + (graded ? '　答對 ' + score[1] + '/' + graded : '') + '　費用 US$' + cost[1].toFixed(4) +
+    (done === 15 ? '\n\n還有沒比較的訊息，請再執行一次。' : '') +
+    '\n\n在 I 欄填正確答案就能自動評分；要重跑某一列，清空那一列的 J～P 欄。';
+  showResult_({ message: msg });
+}
+
 function runParseTest() {
   var sh = ensureSheet_(SHEET.PARSE_TEST, PARSE_HEADERS);
   var n = sh.getLastRow() - 1;
@@ -844,6 +898,7 @@ function setupCore_() {
     });
   }
   var pt = ensureSheet_(SHEET.PARSE_TEST, PARSE_HEADERS);
+  pt.getRange(1, 1, 1, PARSE_HEADERS.length).setValues([PARSE_HEADERS]).setFontWeight('bold');
   pt.getRange(2, 3, pt.getMaxRows() - 1, 1).insertCheckboxes();
   pt.getRange(2, 1, pt.getMaxRows() - 1, 8).setWrap(true).setVerticalAlignment('top');
   ensureSheet_(SHEET.HOLIDAYS, ['日期', '說明']);

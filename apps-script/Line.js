@@ -559,7 +559,7 @@ function askClaude_(text, images, ctx, store) {
     return { error: 'HTTP ' + code };
   }
   var json = JSON.parse(res.getContentText());
-  recordAiUsage_(json, model, text);
+  var usedCost = recordAiUsage_(json, model, text);
   if (json.stop_reason === 'refusal') return { error: 'AI 拒絕判讀' };
   if (json.stop_reason === 'max_tokens') return { error: '回應過長被截斷' };
   var block = (json.content || []).filter(function (b) { return b.type === 'text'; })[0];
@@ -576,7 +576,7 @@ function askClaude_(text, images, ctx, store) {
     }
     valid.push({ product: it.product, qty: q, pin8: it.product === 'DCB-6000' ? p8 : 0 });
   });
-  return { is_order: !!out.is_order, items: valid, concerns: concerns, notes: String(out.notes || '').trim() };
+  return { is_order: !!out.is_order, items: valid, concerns: concerns, notes: String(out.notes || '').trim(), model: json.model || model, cost: usedCost || 0 };
 }
 
 /* ───────────── AI 費用控管 ───────────── */
@@ -603,7 +603,8 @@ function recordAiUsage_(json, model, text) {
     props.setProperty(key, String((Number(props.getProperty(key)) || 0) + cost));
     ensureSheet_('AI使用紀錄', AI_LOG_HEADERS).appendRow([new Date(), json.model || model, u.input_tokens || 0, u.output_tokens || 0,
       Math.round(cost * 10000) / 10000, String(text || '').slice(0, 60)]);
-  } catch (e) { console.error('記錄 AI 用量失敗', e); }
+    return cost;
+  } catch (e) { console.error('記錄 AI 用量失敗', e); return 0; }
 }
 
 function aiMonthCost_() {
@@ -622,7 +623,7 @@ function menuTestAi() {
   showResult_({ message: '✅ AI 連線正常（' + secs + ' 秒）\n\n範例：' + sample + '\n判讀：' +
     (r.items.map(function (it) { return it.product + ' × ' + it.qty + (it.pin8 ? '（8pin ' + it.pin8 + '）' : ''); }).join('、') || '（無品項）') +
     (r.concerns.length ? '\n疑點：' + r.concerns.join('；') : '') +
-    '\n\n模型：' + (cfg['AI模型'] || 'claude-opus-5-5') + '\n本月累計估計費用：US$' + aiMonthCost_().toFixed(4) +
+    '\n\n設定的模型：' + (cfg['AI模型'] || 'claude-opus-5-5') + '　實際回應：' + r.model + '　這次費用：US$' + r.cost.toFixed(4) + '\n本月累計估計費用：US$' + aiMonthCost_().toFixed(4) +
     '（上限 US$' + (Number(cfg['AI每月上限美元']) || '不限') + '）' });
 }
 
