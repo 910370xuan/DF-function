@@ -187,9 +187,23 @@ var Parser = (function () {
   }
 
   /** 從歷史訂單找這家店最近一次的電池類品項，給「小電池」「幫我出10+1」當建議 */
-  function suggestFromHistory(store, history, exclude) {
+  /** 店名比對用：去掉括號註記與空白，例如「信耀車業(午後收貨)」與「信耀車業」視為同一家 */
+  function storeKey(name) {
+    return String(name || '').replace(/[\(（][^\)）]*[\)）]/g, '').replace(/\s+/g, '').trim();
+  }
+
+  /**
+   * 從歷史訂單找這家店最近一次的品項（給「小電池」「幫我出10+1」當建議）。
+   * prefer：優先考慮的型號（例如 10+1 適用的電池），有的話只在這些型號裡找。
+   */
+  function suggestFromHistory(store, history, exclude, prefer) {
     exclude = exclude || /工具|起子|批頭|線組/;
-    var rows = (history || []).filter(function (h) { return h.store === store && h.product && !exclude.test(h.product); });
+    var key = storeKey(store);
+    var rows = (history || []).filter(function (h) { return storeKey(h.store) === key && h.product && !exclude.test(h.product); });
+    if (prefer && prefer.length) {
+      var preferred = rows.filter(function (h) { return prefer.indexOf(h.product) >= 0; });
+      if (preferred.length) rows = preferred;
+    }
     rows.sort(function (a, b) { return String(b.date).localeCompare(String(a.date)); });
     return rows.length ? { product: rows[0].product, qty: Number(rows[0].qty), date: rows[0].date } : null;
   }
@@ -237,9 +251,28 @@ var Parser = (function () {
     return {};
   }
 
+  /**
+   * 分析表單（每家店各型號累計數量）→ 這家店買最多的型號。
+   * table: { headers: [型號...], rows: [[店名, 數量...]] }；只在 prefer 型號中挑（有給的話）。
+   */
+  function topProduct(store, table, prefer) {
+    if (!table || !table.rows) return '';
+    var key = storeKey(store);
+    var row = table.rows.filter(function (r) { return storeKey(r[0]) === key; })[0];
+    if (!row) return '';
+    var best = '', max = 0;
+    table.headers.forEach(function (h, i) {
+      var q = Number(row[i + 1]) || 0;
+      if (prefer && prefer.length && prefer.indexOf(h) < 0) return;
+      if (q > max) { max = q; best = h; }
+    });
+    return best;
+  }
+
   /** 這家店最近 n 筆訂單（給 AI 當參考，不送整份歷史） */
   function recentFor(store, history, n) {
-    var rows = (history || []).filter(function (h) { return h.store === store && h.product; });
+    var key = storeKey(store);
+    var rows = (history || []).filter(function (h) { return storeKey(h.store) === key && h.product; });
     rows.sort(function (a, b) { return String(b.date).localeCompare(String(a.date)); });
     return rows.slice(0, n || 3).map(function (h) { return { product: h.product, qty: Number(h.qty), date: h.date }; });
   }
@@ -273,7 +306,7 @@ var Parser = (function () {
   /** 新版才加入的對照，舊的「型號對照」工作表會自動補上 */
   var ADDED_ALIASES = ['小電池工具組', '工具組', '工具'];
 
-  return { DEFAULT_ALIASES: DEFAULT_ALIASES, ADDED_ALIASES: ADDED_ALIASES, recentFor: recentFor, suggestVendor: suggestVendor, extractDate: extractDate, normalize: normalize, parse: parse, suggestFromHistory: suggestFromHistory };
+  return { DEFAULT_ALIASES: DEFAULT_ALIASES, ADDED_ALIASES: ADDED_ALIASES, recentFor: recentFor, storeKey: storeKey, topProduct: topProduct, suggestVendor: suggestVendor, extractDate: extractDate, normalize: normalize, parse: parse, suggestFromHistory: suggestFromHistory };
 })();
 
 if (typeof module !== 'undefined') module.exports = Parser;

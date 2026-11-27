@@ -1,6 +1,6 @@
 /* 華暉出貨自動化：請整份貼進 Apps Script 的 Code.gs（取代原本內容）。由 scripts/bundle.js 產生，請勿手改。 */
 
-var APP_VERSION = '2026-11-25 05:55';
+var APP_VERSION = '2026-11-27 04:31';
 
 /**
  * 純邏輯（不呼叫任何 Google 服務），Apps Script 與 Node 測試共用。
@@ -35,6 +35,23 @@ var Core = (function () {
     return { orderNo: formatOrderNo(dateStr, serial), state: { month: month, last: serial } };
   }
 
+  function storeKey(name) {
+    return String(name || '').replace(/[\(（][^\)）]*[\)）]/g, '').replace(/\s+/g, '').trim();
+  }
+
+  /**
+   * 把店名對應到廠商清冊上現在的名稱：完全相同優先；否則去掉括號註記後只有一家相符時採用。
+   * 例：綁定時是「信耀車業」，清冊改名「信耀車業(午後收貨)」→ 仍對得上。
+   */
+  function resolveVendor(name, vendors) {
+    var n = String(name || '').trim();
+    if (!n) return '';
+    if ((vendors || []).indexOf(n) >= 0) return n;
+    var key = storeKey(n), hits = [];
+    (vendors || []).forEach(function (v) { if (storeKey(v) === key && hits.indexOf(v) < 0) hits.push(v); });
+    return hits.length === 1 ? hits[0] : '';
+  }
+
   /** 買十送一：同品項每 10 個送 1 個，不跨品項；同一天出貨的同型號先合併再計算 */
   function giftQty(qty, product, eligible) {
     if (eligible && eligible.length && eligible.indexOf(product) < 0) return 0;
@@ -66,6 +83,8 @@ var Core = (function () {
     rows.forEach(function (r) {
       if (r.status !== '待出貨') return;
       if (!r.shipDate || r.shipDate > opts.today) return;
+      var canonical = resolveVendor(r.store, opts.vendors);
+      if (canonical && canonical !== r.store) r = Object.assign({}, r, { store: canonical });
       opts_combos = opts.combos ? toSet(opts.combos) : null;
       var msg = validateRow(r, vendorSet, productSet);
       if (msg) { errors.push({ rowId: r.id, message: msg }); return; }
@@ -320,6 +339,8 @@ var Core = (function () {
     labelPagesFor: labelPagesFor,
     isShippingDay: isShippingDay,
     nextBatchId: nextBatchId,
+    storeKey: storeKey,
+    resolveVendor: resolveVendor,
     addDays: addDays,
     nextShippingDay: nextShippingDay,
     inferShipDate: inferShipDate,
@@ -525,9 +546,23 @@ var Parser = (function () {
   }
 
   /** 從歷史訂單找這家店最近一次的電池類品項，給「小電池」「幫我出10+1」當建議 */
-  function suggestFromHistory(store, history, exclude) {
+  /** 店名比對用：去掉括號註記與空白，例如「信耀車業(午後收貨)」與「信耀車業」視為同一家 */
+  function storeKey(name) {
+    return String(name || '').replace(/[\(（][^\)）]*[\)）]/g, '').replace(/\s+/g, '').trim();
+  }
+
+  /**
+   * 從歷史訂單找這家店最近一次的品項（給「小電池」「幫我出10+1」當建議）。
+   * prefer：優先考慮的型號（例如 10+1 適用的電池），有的話只在這些型號裡找。
+   */
+  function suggestFromHistory(store, history, exclude, prefer) {
     exclude = exclude || /工具|起子|批頭|線組/;
-    var rows = (history || []).filter(function (h) { return h.store === store && h.product && !exclude.test(h.product); });
+    var key = storeKey(store);
+    var rows = (history || []).filter(function (h) { return storeKey(h.store) === key && h.product && !exclude.test(h.product); });
+    if (prefer && prefer.length) {
+      var preferred = rows.filter(function (h) { return prefer.indexOf(h.product) >= 0; });
+      if (preferred.length) rows = preferred;
+    }
     rows.sort(function (a, b) { return String(b.date).localeCompare(String(a.date)); });
     return rows.length ? { product: rows[0].product, qty: Number(rows[0].qty), date: rows[0].date } : null;
   }
@@ -575,9 +610,28 @@ var Parser = (function () {
     return {};
   }
 
+  /**
+   * 分析表單（每家店各型號累計數量）→ 這家店買最多的型號。
+   * table: { headers: [型號...], rows: [[店名, 數量...]] }；只在 prefer 型號中挑（有給的話）。
+   */
+  function topProduct(store, table, prefer) {
+    if (!table || !table.rows) return '';
+    var key = storeKey(store);
+    var row = table.rows.filter(function (r) { return storeKey(r[0]) === key; })[0];
+    if (!row) return '';
+    var best = '', max = 0;
+    table.headers.forEach(function (h, i) {
+      var q = Number(row[i + 1]) || 0;
+      if (prefer && prefer.length && prefer.indexOf(h) < 0) return;
+      if (q > max) { max = q; best = h; }
+    });
+    return best;
+  }
+
   /** 這家店最近 n 筆訂單（給 AI 當參考，不送整份歷史） */
   function recentFor(store, history, n) {
-    var rows = (history || []).filter(function (h) { return h.store === store && h.product; });
+    var key = storeKey(store);
+    var rows = (history || []).filter(function (h) { return storeKey(h.store) === key && h.product; });
     rows.sort(function (a, b) { return String(b.date).localeCompare(String(a.date)); });
     return rows.slice(0, n || 3).map(function (h) { return { product: h.product, qty: Number(h.qty), date: h.date }; });
   }
@@ -611,7 +665,7 @@ var Parser = (function () {
   /** 新版才加入的對照，舊的「型號對照」工作表會自動補上 */
   var ADDED_ALIASES = ['小電池工具組', '工具組', '工具'];
 
-  return { DEFAULT_ALIASES: DEFAULT_ALIASES, ADDED_ALIASES: ADDED_ALIASES, recentFor: recentFor, suggestVendor: suggestVendor, extractDate: extractDate, normalize: normalize, parse: parse, suggestFromHistory: suggestFromHistory };
+  return { DEFAULT_ALIASES: DEFAULT_ALIASES, ADDED_ALIASES: ADDED_ALIASES, recentFor: recentFor, storeKey: storeKey, topProduct: topProduct, suggestVendor: suggestVendor, extractDate: extractDate, normalize: normalize, parse: parse, suggestFromHistory: suggestFromHistory };
 })();
 
 if (typeof module !== 'undefined') module.exports = Parser;
@@ -734,7 +788,7 @@ var SUPPLEMENT_KEY = '產生補單（勾選執行）';
 var CONFIG_DEFAULTS = [
   ['通知Email', '', '多個以逗號分隔'],
   ['輸出資料夾ID', '', 'Google 雲端硬碟資料夾網址最後那串 ID；空白則放在我的雲端硬碟根目錄'],
-  ['主檔試算表ID', '', '日常的「庫存管理及出貨單」試算表 ID；填了會在每次產單前同步廠商清冊'],
+  ['主檔試算表ID', '', '日常的「庫存管理及出貨單」試算表 ID；可填多個用逗號分隔（今年在前、去年在後）。第一個用來同步廠商清冊，全部用來查歷史訂單'],
   ['單據編號月份', '', '例：2026-11（系統自動維護）'],
   ['單據編號最後流水號', 0, '本月已用到的最後號碼；手打出貨單時也請改這裡，避免撞號'],
   ['主批次時間', '10:00', ''],
@@ -782,6 +836,8 @@ function onOpen() {
     .addItem('同步廠商清冊', 'syncVendors')
     .addItem('清理產單暫存試算表', 'cleanupTempSheets')
     .addItem('整理表格外觀', 'menuFormatSheets')
+    .addSeparator()
+    .addItem('取得下一個單據編號（手打出貨單用）', 'reserveOrderNo')
     .addItem('初始化／修復工作表與排程', 'menuSetup')
     .addToUi();
 }
@@ -799,6 +855,10 @@ function tick() {
   try { processLine_(false); } catch (err) { console.error('LINE 訊息處理失敗', err); }
   if (!Core.isShippingDay(today, readHolidays_(), truthy_(cfg['週六出貨']))) return;
 
+  if (hm >= cfg['主批次時間'] && props.getProperty('archiveDone') !== today) {
+    props.setProperty('archiveDone', today);
+    try { archiveLog_(30); } catch (err) { console.error('封存失敗', err); }
+  }
   if (hm >= cfg['待確認提醒時間'] && props.getProperty('remindDone') !== today) {
     props.setProperty('remindDone', today);
     try { remindPending_(today); } catch (err) { console.error('提醒失敗', err); }
@@ -1026,6 +1086,19 @@ function freezeAll_(sheet, page, lastCol) {
   rng.setValues(rng.getValues());
 }
 
+/** 手打出貨單時：取號並記錄，避免與系統撞號 */
+function reserveOrderNo() {
+  var lock = LockService.getScriptLock();
+  if (!lock.tryLock(30000)) { showResult_({ message: '系統正在產單，請稍後再試' }); return; }
+  try {
+    var cfg = readConfig_();
+    var r = Core.nextOrderNo({ month: String(cfg['單據編號月份'] || ''), last: Number(cfg['單據編號最後流水號']) || 0 }, fmtDate_(new Date()));
+    setConfig_('單據編號月份', r.state.month);
+    setConfig_('單據編號最後流水號', r.state.last);
+    showResult_({ message: '這張手打出貨單請用：\n\n' + r.orderNo + '\n\n（已記錄，系統下一張會自動接續）' });
+  } finally { lock.releaseLock(); }
+}
+
 function subfolder_(parent, name) {
   var it = parent.getFoldersByName(name);
   return it.hasNext() ? it.next() : parent.createFolder(name);
@@ -1247,8 +1320,12 @@ function readBatchIds_() {
 }
 
 /** 從主檔同步廠商清冊（只同步值） */
+function mainIds_() {
+  return String(readConfig_()['主檔試算表ID'] || '').split(/[,，\s]+/).map(function (x) { return x.trim(); }).filter(String);
+}
+
 function syncVendors() {
-  var id = readConfig_()['主檔試算表ID'];
+  var id = mainIds_()[0];
   if (!id) throw new Error('請先在「設定」填入主檔試算表ID');
   var src = SpreadsheetApp.openById(id).getSheetByName(SHEET.VENDORS);
   if (!src) throw new Error('主檔找不到「廠商清冊」工作表');
@@ -1275,18 +1352,53 @@ function readHistory_() {
   var hist = readOrders_().rows
     .filter(function (r) { return r.store && r.product; })
     .map(function (r) { return { store: r.store, product: r.product, qty: r.qty, date: r.shipDate }; });
-  var id = readConfig_()['主檔試算表ID'];
-  if (id) {
-    var sh = SpreadsheetApp.openById(id).getSheetByName('庫存管理');
-    if (sh && sh.getLastRow() > 2) {
+  mainIds_().forEach(function (id) {
+    try {
+      var sh = SpreadsheetApp.openById(id).getSheetByName('庫存管理');
+      if (!sh || sh.getLastRow() <= 2) return;
       // A 日期、C 出庫、D 商品名稱、E 數量、G 出貨渠道、H 客戶名稱
       sh.getRange(3, 1, sh.getLastRow() - 2, 8).getValues().forEach(function (r) {
         if (r[2] !== '出庫' || !r[7] || !r[3] || r[6] === '特贈') return;
         hist.push({ store: String(r[7]).trim(), product: String(r[3]).trim(), qty: r[4], date: isDate_(r[0]) ? fmtDate_(r[0]) : Core.normalizeDate(r[0]) });
       });
-    }
-  }
+    } catch (e) { console.error('讀取主檔歷史失敗 ' + id, e); }
+  });
   return hist;
+}
+
+/** 主檔「分析表單」AA 欄起：每家店各型號累計數量（多個主檔加總） */
+function readTopTable_() {
+  var byStore = {}, headers = [];
+  mainIds_().forEach(function (id) {
+    try {
+      var sh = SpreadsheetApp.openById(id).getSheetByName('分析表單');
+      if (!sh || sh.getLastRow() < 4) return;
+      var data = sh.getRange(3, 27, sh.getLastRow() - 2, 8).getValues(); // AA:AH，第 3 列是型號標題
+      var head = data[0].slice(1).map(function (h) { return String(h).trim(); });
+      data.slice(1).forEach(function (r) {
+        var store = String(r[0]).trim();
+        if (!store || store === '總和') return;
+        byStore[store] = byStore[store] || {};
+        head.forEach(function (h, i) {
+          if (!h || h === '總和') return;
+          if (headers.indexOf(h) < 0) headers.push(h);
+          byStore[store][h] = (byStore[store][h] || 0) + (Number(r[i + 1]) || 0);
+        });
+      });
+    } catch (e) { console.error('讀取分析表單失敗 ' + id, e); }
+  });
+  return { headers: headers, rows: Object.keys(byStore).map(function (st) { return [st].concat(headers.map(function (h) { return byStore[st][h] || 0; })); }) };
+}
+
+/** 模糊品項（小電池／10+1）的建議：先查上一筆，沒有再用累計最常買的型號 */
+function suggestVague_(store, ctx) {
+  var prefer = splitList_(ctx.cfg['10+1適用型號']);
+  ctx.history = ctx.history || readHistory_();
+  var sug = Parser.suggestFromHistory(store, ctx.history, null, prefer);
+  if (sug) return { product: sug.product, why: '上一筆訂單（' + sug.date + '）' };
+  ctx.top = ctx.top || readTopTable_();
+  var top = Parser.topProduct(store, ctx.top, prefer);
+  return top ? { product: top, why: '這家店累計最常買的型號' } : null;
 }
 
 function runParseTest() {
@@ -1302,9 +1414,9 @@ function runParseTest() {
     var res = Parser.parse(r[0], { aliases: aliases, hasImage: r[2] === true, today: today });
     var sug = '';
     if (res.vague && String(r[1]).trim()) {
-      history = history || readHistory_();
-      var h = Parser.suggestFromHistory(String(r[1]).trim(), history);
-      sug = h ? h.product + ' × ' + h.qty + '（' + h.date + '）' : '查無這家店的歷史訂單';
+      history = history || { cfg: readConfig_() };
+      var h = suggestVague_(String(r[1]).trim(), history);
+      sug = h ? h.product + '（' + h.why + '）' : '查無這家店的歷史訂單';
     }
     return [
       kindText[res.kind],
@@ -1636,17 +1748,20 @@ function handleSegment_(seg, ctx, log) {
   };
   if (res.kind === 'not_order') { mark('非訂單'); return 'not_order'; }
 
-  var store = ctx.bindings[seg.userId] || '';
+  var bound = ctx.bindings[seg.userId] || '';
+  // 廠商清冊改名（例如加上「(午後收貨)」）後仍對得上
+  var store = bound ? (Core.resolveVendor(bound, ctx.vendors || (ctx.vendors = readVendorNames_())) || bound) : '';
   var items = res.items.slice(), reasons = res.reasons.slice(), notes = res.notes.slice();
   var kind = res.kind;
 
-  // 只說「小電池／幫我出10+1」：先照客服的做法查這家店上一筆訂單（免費、可預期）
+  // 只說「小電池／幫我出10+1」：先查上一筆訂單，沒有再用累計最常買的型號（都免費）
   if (res.vague && !items.length && store) {
-    ctx.history = ctx.history || readHistory_();
-    var sug = Parser.suggestFromHistory(store, ctx.history);
+    var sug = suggestVague_(store, ctx);
     if (sug) {
       items = [{ product: sug.product, qty: res.vague.qty, pin8: 0 }];
-      reasons.push('型號依上一筆訂單推測：' + sug.product + '（' + sug.date + '），請確認');
+      reasons.push('型號依' + sug.why + '推測：' + sug.product + '，請確認');
+    } else {
+      reasons.push('這家店沒有歷史訂單可參考，請確認型號');
     }
   }
   // 還是判斷不了（沒有品項、或有圖片）才交給 Claude
@@ -1823,8 +1938,23 @@ function remindPending_(today) {
       }
     });
   }
-  if (!list.length && !nonOrders.length) return;
+  // 今天與下個出貨日的待出貨：讓客服對照自己在 LINE 答應客戶的日期
+  var next = Core.nextShippingDay(today, readHolidays_(), truthy_(readConfig_()['週六出貨']));
+  var ship = [];
+  var osh = SpreadsheetApp.getActive().getSheetByName(SHEET.ORDERS);
+  if (osh && osh.getLastRow() > 1) {
+    osh.getRange(2, 1, osh.getLastRow() - 1, ORDER_HEADERS.length).getValues().forEach(function (r) {
+      if (r[COL['狀態']] !== '待出貨') return;
+      var d = r[COL['出貨日']], ds = isDate_(d) ? fmtDate_(d) : Core.normalizeDate(d);
+      if (ds && ds <= next) ship.push([ds <= today ? '今天' : ds.slice(5).replace('-', '/'), r[COL['店家']], r[COL['型號']], r[COL['數量']], r[COL['附註']]]);
+    });
+  }
+  if (!list.length && !nonOrders.length && !ship.length) return;
   var html = '';
+  if (ship.length) {
+    html += '<p>📦 今天與下個出貨日（' + next.slice(5).replace('-', '/') + '）的待出貨，請對照在 LINE 答應客戶的日期：</p><table border="1" cellpadding="4" style="border-collapse:collapse"><tr><th>出貨</th><th>店家</th><th>品項</th><th>附註</th></tr>' +
+      ship.map(function (x) { return '<tr><td>' + esc_(x[0]) + '</td><td>' + esc_(x[1]) + '</td><td>' + esc_(x[2] + ' × ' + x[3]) + '</td><td>' + esc_(x[4] || '') + '</td></tr>'; }).join('') + '</table>';
+  }
   if (list.length) {
     html += '<p>還有 <b>' + list.length + '</b> 筆待確認：</p><table border="1" cellpadding="4" style="border-collapse:collapse"><tr><th>工作表</th><th>店家</th><th>品項</th><th>原因／原文</th></tr>' +
       list.map(function (x) { return '<tr><td>' + esc_(x[0]) + '</td><td>' + esc_(x[1]) + '</td><td>' + esc_((x[2] || '?') + ' × ' + (x[3] || '?')) + '</td><td>' + esc_(x[4]).replace(/\n/g, '<br>') + '</td></tr>'; }).join('') + '</table>';
@@ -1834,7 +1964,7 @@ function remindPending_(today) {
       nonOrders.map(function (t) { return '<li>' + esc_(t) + '</li>'; }).join('') + '</ul>';
   }
   html += '<p><a href="' + SpreadsheetApp.getActive().getUrl() + '">開啟華暉出貨自動化</a></p>';
-  notify_('【出貨】' + today + ' 待確認 ' + list.length + ' 筆', html, []);
+  notify_('【出貨】' + today + ' 待確認 ' + list.length + ' 筆、待出貨 ' + ship.length + ' 筆', html, []);
 }
 
 /* ───────────── Claude 判讀 ───────────── */
@@ -1961,6 +2091,25 @@ function menuSetKeys() {
   ui.alert('轉送密鑰（請貼到 Cloudflare 的 FORWARD_SECRET）', props.getProperty('FORWARD_SECRET') +
     '\n\n目前狀態：LINE token ' + (props.getProperty('LINE_TOKEN') ? '已設定' : '未設定') +
     '；Claude 金鑰 ' + (props.getProperty('ANTHROPIC_API_KEY') ? '已設定' : '未設定'), ui.ButtonSet.OK);
+}
+
+/** 訊息紀錄：已處理且超過 days 天的移到「訊息紀錄封存」，主表保持精簡 */
+function archiveLog_(days) {
+  var log = SpreadsheetApp.getActive().getSheetByName(LINE_SHEET.LOG);
+  if (!log || log.getLastRow() < 2) return 0;
+  var cutoff = Date.now() - days * 86400000;
+  var data = log.getRange(2, 1, log.getLastRow() - 1, LOG_HEADERS.length).getValues();
+  var keep = [], old = [];
+  data.forEach(function (r) {
+    var t = new Date(r[LOG_COL['收到時間']]).getTime();
+    (r[LOG_COL['狀態']] !== '未處理' && t < cutoff ? old : keep).push(r);
+  });
+  if (!old.length) return 0;
+  var arc = ensureSheet_(LINE_SHEET.LOG + '封存', LOG_HEADERS);
+  arc.getRange(arc.getLastRow() + 1, 1, old.length, LOG_HEADERS.length).setValues(old);
+  log.getRange(2, 1, data.length, LOG_HEADERS.length).clearContent();
+  if (keep.length) log.getRange(2, 1, keep.length, LOG_HEADERS.length).setValues(keep);
+  return old.length;
 }
 
 function unique_(arr) { return arr.filter(function (x, i) { return x !== '' && arr.indexOf(x) === i; }); }

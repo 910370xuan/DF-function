@@ -133,17 +133,20 @@ function handleSegment_(seg, ctx, log) {
   };
   if (res.kind === 'not_order') { mark('非訂單'); return 'not_order'; }
 
-  var store = ctx.bindings[seg.userId] || '';
+  var bound = ctx.bindings[seg.userId] || '';
+  // 廠商清冊改名（例如加上「(午後收貨)」）後仍對得上
+  var store = bound ? (Core.resolveVendor(bound, ctx.vendors || (ctx.vendors = readVendorNames_())) || bound) : '';
   var items = res.items.slice(), reasons = res.reasons.slice(), notes = res.notes.slice();
   var kind = res.kind;
 
-  // 只說「小電池／幫我出10+1」：先照客服的做法查這家店上一筆訂單（免費、可預期）
+  // 只說「小電池／幫我出10+1」：先查上一筆訂單，沒有再用累計最常買的型號（都免費）
   if (res.vague && !items.length && store) {
-    ctx.history = ctx.history || readHistory_();
-    var sug = Parser.suggestFromHistory(store, ctx.history);
+    var sug = suggestVague_(store, ctx);
     if (sug) {
       items = [{ product: sug.product, qty: res.vague.qty, pin8: 0 }];
-      reasons.push('型號依上一筆訂單推測：' + sug.product + '（' + sug.date + '），請確認');
+      reasons.push('型號依' + sug.why + '推測：' + sug.product + '，請確認');
+    } else {
+      reasons.push('這家店沒有歷史訂單可參考，請確認型號');
     }
   }
   // 還是判斷不了（沒有品項、或有圖片）才交給 Claude
@@ -320,8 +323,23 @@ function remindPending_(today) {
       }
     });
   }
-  if (!list.length && !nonOrders.length) return;
+  // 今天與下個出貨日的待出貨：讓客服對照自己在 LINE 答應客戶的日期
+  var next = Core.nextShippingDay(today, readHolidays_(), truthy_(readConfig_()['週六出貨']));
+  var ship = [];
+  var osh = SpreadsheetApp.getActive().getSheetByName(SHEET.ORDERS);
+  if (osh && osh.getLastRow() > 1) {
+    osh.getRange(2, 1, osh.getLastRow() - 1, ORDER_HEADERS.length).getValues().forEach(function (r) {
+      if (r[COL['狀態']] !== '待出貨') return;
+      var d = r[COL['出貨日']], ds = isDate_(d) ? fmtDate_(d) : Core.normalizeDate(d);
+      if (ds && ds <= next) ship.push([ds <= today ? '今天' : ds.slice(5).replace('-', '/'), r[COL['店家']], r[COL['型號']], r[COL['數量']], r[COL['附註']]]);
+    });
+  }
+  if (!list.length && !nonOrders.length && !ship.length) return;
   var html = '';
+  if (ship.length) {
+    html += '<p>📦 今天與下個出貨日（' + next.slice(5).replace('-', '/') + '）的待出貨，請對照在 LINE 答應客戶的日期：</p><table border="1" cellpadding="4" style="border-collapse:collapse"><tr><th>出貨</th><th>店家</th><th>品項</th><th>附註</th></tr>' +
+      ship.map(function (x) { return '<tr><td>' + esc_(x[0]) + '</td><td>' + esc_(x[1]) + '</td><td>' + esc_(x[2] + ' × ' + x[3]) + '</td><td>' + esc_(x[4] || '') + '</td></tr>'; }).join('') + '</table>';
+  }
   if (list.length) {
     html += '<p>還有 <b>' + list.length + '</b> 筆待確認：</p><table border="1" cellpadding="4" style="border-collapse:collapse"><tr><th>工作表</th><th>店家</th><th>品項</th><th>原因／原文</th></tr>' +
       list.map(function (x) { return '<tr><td>' + esc_(x[0]) + '</td><td>' + esc_(x[1]) + '</td><td>' + esc_((x[2] || '?') + ' × ' + (x[3] || '?')) + '</td><td>' + esc_(x[4]).replace(/\n/g, '<br>') + '</td></tr>'; }).join('') + '</table>';
@@ -331,7 +349,7 @@ function remindPending_(today) {
       nonOrders.map(function (t) { return '<li>' + esc_(t) + '</li>'; }).join('') + '</ul>';
   }
   html += '<p><a href="' + SpreadsheetApp.getActive().getUrl() + '">開啟華暉出貨自動化</a></p>';
-  notify_('【出貨】' + today + ' 待確認 ' + list.length + ' 筆', html, []);
+  notify_('【出貨】' + today + ' 待確認 ' + list.length + ' 筆、待出貨 ' + ship.length + ' 筆', html, []);
 }
 
 /* ───────────── Claude 判讀 ───────────── */
@@ -458,6 +476,25 @@ function menuSetKeys() {
   ui.alert('轉送密鑰（請貼到 Cloudflare 的 FORWARD_SECRET）', props.getProperty('FORWARD_SECRET') +
     '\n\n目前狀態：LINE token ' + (props.getProperty('LINE_TOKEN') ? '已設定' : '未設定') +
     '；Claude 金鑰 ' + (props.getProperty('ANTHROPIC_API_KEY') ? '已設定' : '未設定'), ui.ButtonSet.OK);
+}
+
+/** 訊息紀錄：已處理且超過 days 天的移到「訊息紀錄封存」，主表保持精簡 */
+function archiveLog_(days) {
+  var log = SpreadsheetApp.getActive().getSheetByName(LINE_SHEET.LOG);
+  if (!log || log.getLastRow() < 2) return 0;
+  var cutoff = Date.now() - days * 86400000;
+  var data = log.getRange(2, 1, log.getLastRow() - 1, LOG_HEADERS.length).getValues();
+  var keep = [], old = [];
+  data.forEach(function (r) {
+    var t = new Date(r[LOG_COL['收到時間']]).getTime();
+    (r[LOG_COL['狀態']] !== '未處理' && t < cutoff ? old : keep).push(r);
+  });
+  if (!old.length) return 0;
+  var arc = ensureSheet_(LINE_SHEET.LOG + '封存', LOG_HEADERS);
+  arc.getRange(arc.getLastRow() + 1, 1, old.length, LOG_HEADERS.length).setValues(old);
+  log.getRange(2, 1, data.length, LOG_HEADERS.length).clearContent();
+  if (keep.length) log.getRange(2, 1, keep.length, LOG_HEADERS.length).setValues(keep);
+  return old.length;
 }
 
 function unique_(arr) { return arr.filter(function (x, i) { return x !== '' && arr.indexOf(x) === i; }); }

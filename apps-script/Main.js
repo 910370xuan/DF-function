@@ -28,7 +28,7 @@ var SUPPLEMENT_KEY = '產生補單（勾選執行）';
 var CONFIG_DEFAULTS = [
   ['通知Email', '', '多個以逗號分隔'],
   ['輸出資料夾ID', '', 'Google 雲端硬碟資料夾網址最後那串 ID；空白則放在我的雲端硬碟根目錄'],
-  ['主檔試算表ID', '', '日常的「庫存管理及出貨單」試算表 ID；填了會在每次產單前同步廠商清冊'],
+  ['主檔試算表ID', '', '日常的「庫存管理及出貨單」試算表 ID；可填多個用逗號分隔（今年在前、去年在後）。第一個用來同步廠商清冊，全部用來查歷史訂單'],
   ['單據編號月份', '', '例：2026-11（系統自動維護）'],
   ['單據編號最後流水號', 0, '本月已用到的最後號碼；手打出貨單時也請改這裡，避免撞號'],
   ['主批次時間', '10:00', ''],
@@ -76,6 +76,8 @@ function onOpen() {
     .addItem('同步廠商清冊', 'syncVendors')
     .addItem('清理產單暫存試算表', 'cleanupTempSheets')
     .addItem('整理表格外觀', 'menuFormatSheets')
+    .addSeparator()
+    .addItem('取得下一個單據編號（手打出貨單用）', 'reserveOrderNo')
     .addItem('初始化／修復工作表與排程', 'menuSetup')
     .addToUi();
 }
@@ -93,6 +95,10 @@ function tick() {
   try { processLine_(false); } catch (err) { console.error('LINE 訊息處理失敗', err); }
   if (!Core.isShippingDay(today, readHolidays_(), truthy_(cfg['週六出貨']))) return;
 
+  if (hm >= cfg['主批次時間'] && props.getProperty('archiveDone') !== today) {
+    props.setProperty('archiveDone', today);
+    try { archiveLog_(30); } catch (err) { console.error('封存失敗', err); }
+  }
   if (hm >= cfg['待確認提醒時間'] && props.getProperty('remindDone') !== today) {
     props.setProperty('remindDone', today);
     try { remindPending_(today); } catch (err) { console.error('提醒失敗', err); }
@@ -320,6 +326,19 @@ function freezeAll_(sheet, page, lastCol) {
   rng.setValues(rng.getValues());
 }
 
+/** 手打出貨單時：取號並記錄，避免與系統撞號 */
+function reserveOrderNo() {
+  var lock = LockService.getScriptLock();
+  if (!lock.tryLock(30000)) { showResult_({ message: '系統正在產單，請稍後再試' }); return; }
+  try {
+    var cfg = readConfig_();
+    var r = Core.nextOrderNo({ month: String(cfg['單據編號月份'] || ''), last: Number(cfg['單據編號最後流水號']) || 0 }, fmtDate_(new Date()));
+    setConfig_('單據編號月份', r.state.month);
+    setConfig_('單據編號最後流水號', r.state.last);
+    showResult_({ message: '這張手打出貨單請用：\n\n' + r.orderNo + '\n\n（已記錄，系統下一張會自動接續）' });
+  } finally { lock.releaseLock(); }
+}
+
 function subfolder_(parent, name) {
   var it = parent.getFoldersByName(name);
   return it.hasNext() ? it.next() : parent.createFolder(name);
@@ -541,8 +560,12 @@ function readBatchIds_() {
 }
 
 /** 從主檔同步廠商清冊（只同步值） */
+function mainIds_() {
+  return String(readConfig_()['主檔試算表ID'] || '').split(/[,，\s]+/).map(function (x) { return x.trim(); }).filter(String);
+}
+
 function syncVendors() {
-  var id = readConfig_()['主檔試算表ID'];
+  var id = mainIds_()[0];
   if (!id) throw new Error('請先在「設定」填入主檔試算表ID');
   var src = SpreadsheetApp.openById(id).getSheetByName(SHEET.VENDORS);
   if (!src) throw new Error('主檔找不到「廠商清冊」工作表');
@@ -569,18 +592,53 @@ function readHistory_() {
   var hist = readOrders_().rows
     .filter(function (r) { return r.store && r.product; })
     .map(function (r) { return { store: r.store, product: r.product, qty: r.qty, date: r.shipDate }; });
-  var id = readConfig_()['主檔試算表ID'];
-  if (id) {
-    var sh = SpreadsheetApp.openById(id).getSheetByName('庫存管理');
-    if (sh && sh.getLastRow() > 2) {
+  mainIds_().forEach(function (id) {
+    try {
+      var sh = SpreadsheetApp.openById(id).getSheetByName('庫存管理');
+      if (!sh || sh.getLastRow() <= 2) return;
       // A 日期、C 出庫、D 商品名稱、E 數量、G 出貨渠道、H 客戶名稱
       sh.getRange(3, 1, sh.getLastRow() - 2, 8).getValues().forEach(function (r) {
         if (r[2] !== '出庫' || !r[7] || !r[3] || r[6] === '特贈') return;
         hist.push({ store: String(r[7]).trim(), product: String(r[3]).trim(), qty: r[4], date: isDate_(r[0]) ? fmtDate_(r[0]) : Core.normalizeDate(r[0]) });
       });
-    }
-  }
+    } catch (e) { console.error('讀取主檔歷史失敗 ' + id, e); }
+  });
   return hist;
+}
+
+/** 主檔「分析表單」AA 欄起：每家店各型號累計數量（多個主檔加總） */
+function readTopTable_() {
+  var byStore = {}, headers = [];
+  mainIds_().forEach(function (id) {
+    try {
+      var sh = SpreadsheetApp.openById(id).getSheetByName('分析表單');
+      if (!sh || sh.getLastRow() < 4) return;
+      var data = sh.getRange(3, 27, sh.getLastRow() - 2, 8).getValues(); // AA:AH，第 3 列是型號標題
+      var head = data[0].slice(1).map(function (h) { return String(h).trim(); });
+      data.slice(1).forEach(function (r) {
+        var store = String(r[0]).trim();
+        if (!store || store === '總和') return;
+        byStore[store] = byStore[store] || {};
+        head.forEach(function (h, i) {
+          if (!h || h === '總和') return;
+          if (headers.indexOf(h) < 0) headers.push(h);
+          byStore[store][h] = (byStore[store][h] || 0) + (Number(r[i + 1]) || 0);
+        });
+      });
+    } catch (e) { console.error('讀取分析表單失敗 ' + id, e); }
+  });
+  return { headers: headers, rows: Object.keys(byStore).map(function (st) { return [st].concat(headers.map(function (h) { return byStore[st][h] || 0; })); }) };
+}
+
+/** 模糊品項（小電池／10+1）的建議：先查上一筆，沒有再用累計最常買的型號 */
+function suggestVague_(store, ctx) {
+  var prefer = splitList_(ctx.cfg['10+1適用型號']);
+  ctx.history = ctx.history || readHistory_();
+  var sug = Parser.suggestFromHistory(store, ctx.history, null, prefer);
+  if (sug) return { product: sug.product, why: '上一筆訂單（' + sug.date + '）' };
+  ctx.top = ctx.top || readTopTable_();
+  var top = Parser.topProduct(store, ctx.top, prefer);
+  return top ? { product: top, why: '這家店累計最常買的型號' } : null;
 }
 
 function runParseTest() {
@@ -596,9 +654,9 @@ function runParseTest() {
     var res = Parser.parse(r[0], { aliases: aliases, hasImage: r[2] === true, today: today });
     var sug = '';
     if (res.vague && String(r[1]).trim()) {
-      history = history || readHistory_();
-      var h = Parser.suggestFromHistory(String(r[1]).trim(), history);
-      sug = h ? h.product + ' × ' + h.qty + '（' + h.date + '）' : '查無這家店的歷史訂單';
+      history = history || { cfg: readConfig_() };
+      var h = suggestVague_(String(r[1]).trim(), history);
+      sug = h ? h.product + '（' + h.why + '）' : '查無這家店的歷史訂單';
     }
     return [
       kindText[res.kind],

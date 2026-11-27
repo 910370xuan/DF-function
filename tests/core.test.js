@@ -198,3 +198,16 @@ test('價格組合：同店任一列指定即套用；不在價格表退回', ()
   assert.strictEqual(groups[0].priceCombo, 'D(稅外加)');
   assert.deepStrictEqual(errors.map(e => e.rowId), ['c']);
 });
+
+test('店名改加括號註記仍對得上', () => {
+  const v = ['信耀車業(午後收貨)', '格錸車業', '微霖科技有限公司', '微霖科技有限公司(中和)'];
+  assert.strictEqual(Core.resolveVendor('信耀車業', v), '信耀車業(午後收貨)');
+  assert.strictEqual(Core.resolveVendor('格錸車業', v), '格錸車業');
+  assert.strictEqual(Core.resolveVendor('格錸車業(午後收貨)', v), '格錸車業');
+  assert.strictEqual(Core.resolveVendor('沒有這家', v), '');
+  const { groups, errors } = Core.buildGroups([
+    { id: 'a', shipDate: '2026-11-17', store: '信耀車業', product: 'GPB-2000', qty: 1, status: '待出貨' }
+  ], { today: '2026-11-17', vendors: v, products: ['GPB-2000'] });
+  assert.deepStrictEqual(errors, []);
+  assert.strictEqual(groups[0].store, '信耀車業(午後收貨)');
+});

@@ -31,6 +31,23 @@ var Core = (function () {
     return { orderNo: formatOrderNo(dateStr, serial), state: { month: month, last: serial } };
   }
 
+  function storeKey(name) {
+    return String(name || '').replace(/[\(（][^\)）]*[\)）]/g, '').replace(/\s+/g, '').trim();
+  }
+
+  /**
+   * 把店名對應到廠商清冊上現在的名稱：完全相同優先；否則去掉括號註記後只有一家相符時採用。
+   * 例：綁定時是「信耀車業」，清冊改名「信耀車業(午後收貨)」→ 仍對得上。
+   */
+  function resolveVendor(name, vendors) {
+    var n = String(name || '').trim();
+    if (!n) return '';
+    if ((vendors || []).indexOf(n) >= 0) return n;
+    var key = storeKey(n), hits = [];
+    (vendors || []).forEach(function (v) { if (storeKey(v) === key && hits.indexOf(v) < 0) hits.push(v); });
+    return hits.length === 1 ? hits[0] : '';
+  }
+
   /** 買十送一：同品項每 10 個送 1 個，不跨品項；同一天出貨的同型號先合併再計算 */
   function giftQty(qty, product, eligible) {
     if (eligible && eligible.length && eligible.indexOf(product) < 0) return 0;
@@ -62,6 +79,8 @@ var Core = (function () {
     rows.forEach(function (r) {
       if (r.status !== '待出貨') return;
       if (!r.shipDate || r.shipDate > opts.today) return;
+      var canonical = resolveVendor(r.store, opts.vendors);
+      if (canonical && canonical !== r.store) r = Object.assign({}, r, { store: canonical });
       opts_combos = opts.combos ? toSet(opts.combos) : null;
       var msg = validateRow(r, vendorSet, productSet);
       if (msg) { errors.push({ rowId: r.id, message: msg }); return; }
@@ -316,6 +335,8 @@ var Core = (function () {
     labelPagesFor: labelPagesFor,
     isShippingDay: isShippingDay,
     nextBatchId: nextBatchId,
+    storeKey: storeKey,
+    resolveVendor: resolveVendor,
     addDays: addDays,
     nextShippingDay: nextShippingDay,
     inferShipDate: inferShipDate,

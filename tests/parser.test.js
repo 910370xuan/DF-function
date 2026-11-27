@@ -180,3 +180,18 @@ test('最近 3 筆訂單', () => {
   const h = [1, 2, 3, 4].map(i => ({ store: 'A', product: 'GPB-2000', qty: i, date: '2026-11-0' + i }));
   assert.deepStrictEqual(Parser.recentFor('A', h, 3).map(x => x.qty), [4, 3, 2]);
 });
+
+test('歷史：店名括號不影響、優先電池型號；最常買型號', () => {
+  const h = [
+    { store: '信耀車業', product: '小電池工具組', qty: 3, date: '2026-11-10' },
+    { store: '信耀車業', product: 'GBC-4000', qty: 1, date: '2026-11-09' },
+    { store: '信耀車業', product: 'GPB-2000A', qty: 10, date: '2026-11-01' }
+  ];
+  const prefer = ['GPB-2000', 'GPB-2000A', 'GPB-2000S', 'DCB-6000'];
+  assert.deepStrictEqual(Parser.suggestFromHistory('信耀車業(午後收貨)', h, null, prefer), { product: 'GPB-2000A', qty: 10, date: '2026-11-01' });
+  assert.strictEqual(Parser.suggestFromHistory('信耀車業', h).product, 'GBC-4000');
+  const table = { headers: ['DCB-6000', 'GBC-4000', 'GPB-2000', 'GPB-2000A'], rows: [['麒鎮車業行', 5, 40, 30, 2]] };
+  assert.strictEqual(Parser.topProduct('麒鎮車業行', table, prefer), 'GPB-2000');
+  assert.strictEqual(Parser.topProduct('麒鎮車業行', table), 'GBC-4000');
+  assert.strictEqual(Parser.topProduct('別家', table, prefer), '');
+});
