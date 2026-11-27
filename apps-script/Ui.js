@@ -49,6 +49,7 @@ function formatSheets_() {
   });
   step('新客戶待建檔', function () { formatNewCustomerSheet_(ensureSheet_(NEW_SHEET, NEW_HEADERS)); });
   step('回收紀錄', function () {
+    if (!truthy_(readConfig_()['記錄回收'])) return; // 目前不處理回收，不建立這張表
     var sh = ensureSheet_(LINE_SHEET.RECYCLE, RECYCLE_HEADERS);
     formatSimple_(sh, { 1: 140, 2: 180, 3: 120, 4: 60, 5: 320, 6: 60, 7: 90, 8: 160 }, [6]);
     sh.getRange(2, 1, sh.getMaxRows() - 1, 1).setNumberFormat('mm/dd hh:mm');

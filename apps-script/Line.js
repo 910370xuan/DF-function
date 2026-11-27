@@ -204,6 +204,8 @@ function handleSegment_(seg, ctx, log) {
     if (!store) storeNote = '這個帳號／群組綁了多家店（' + bound.join('、') + '），訊息沒寫是哪一家，請選擇店家';
   }
   if (res.kind === 'recycle') {
+    // 回收不是訂單；目前不處理，只在訊息紀錄標記（設定勾「記錄回收」才寫入回收紀錄表）
+    if (!truthy_(cfg['記錄回收'])) { mark('回收（不處理）'); return 'recycle'; }
     var st = store || Parser.matchStore(text, ctx.vendorInfo) || '';
     var rsh = ensureSheet_(LINE_SHEET.RECYCLE, RECYCLE_HEADERS);
     var rrows = res.items.map(function (it) {

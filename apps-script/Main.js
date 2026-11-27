@@ -58,6 +58,7 @@ var CONFIG_DEFAULTS = [
   ['強制合併時間', '15:50', '這個時間到當日截止之間，不等待、直接處理所有訊息'],
   ['接近截止提醒分鐘', 30, '截止前幾分鐘內下的單標成待確認'],
   ['待確認提醒時間', '15:30', '寄出待確認清單與「不是訂單」訊息清單'],
+  ['記錄回收', false, '勾選後「XX回收電力盒*N」會記到「回收紀錄」表；不勾選只標記為不是訂單'],
   ['自動寫入庫存管理', true, '產單後把出庫（含 10+1 特贈）接在主檔「庫存管理」最後面，建檔人員為「系統」；不會修改既有資料'],
   ['新客戶價格組合', 'A', '新客戶建檔草稿的預設價格組合'],
   ['新客戶要工具價格組合', 'B', '新客戶第一張訂單要工具時'],
@@ -778,7 +779,7 @@ function setupCore_() {
   CONFIG_DEFAULTS.forEach(function (d) { if (existing.indexOf(d[0]) < 0) cfg.appendRow(d); });
   var keys = cfg.getRange(1, 1, cfg.getLastRow(), 1).getValues();
   keys.forEach(function (k, i) {
-    if ([SUPPLEMENT_KEY, '週六出貨', '試跑模式', 'AI判讀', '輸出Excel', '輸出PDF', '貨運單粗體', '自動寫入庫存管理'].indexOf(k[0]) >= 0) cfg.getRange(i + 1, 2).insertCheckboxes();
+    if ([SUPPLEMENT_KEY, '週六出貨', '試跑模式', 'AI判讀', '輸出Excel', '輸出PDF', '貨運單粗體', '自動寫入庫存管理', '記錄回收'].indexOf(k[0]) >= 0) cfg.getRange(i + 1, 2).insertCheckboxes();
     if (k[0] === '單據編號月份' || String(k[0]).indexOf('時間') >= 0) cfg.getRange(i + 1, 2).setNumberFormat('@');
   });
 
