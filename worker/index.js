@@ -60,7 +60,7 @@ export async function forward(env, rawBody, fetchImpl = fetch) {
         body: payload,
         redirect: 'manual'
       });
-      if (res.status < 400) return true;
+      if (res.status < 400) { console.log('已轉送到 Apps Script（HTTP ' + res.status + '）'); return true; }
       lastErr = new Error('Apps Script 回應 ' + res.status);
     } catch (e) {
       lastErr = e;
@@ -91,11 +91,15 @@ export default {
     const raw = await request.text();
     // 貼上時多出的空白或換行不影響驗證
     const ok = await verifyLineSignature(raw, request.headers.get('x-line-signature'), String(env.LINE_CHANNEL_SECRET || '').trim());
-    if (!ok) return new Response('bad signature', { status: 401 });
+    if (!ok) {
+      console.warn('LINE 簽章驗證失敗：LINE_CHANNEL_SECRET 與 LINE Developers 的 Channel secret 不同');
+      return new Response('bad signature', { status: 401 });
+    }
 
     // LINE 後台按「驗證」時送的是空事件，直接回 200
     let events = [];
     try { events = JSON.parse(raw).events || []; } catch (e) { return new Response('bad json', { status: 400 }); }
+    console.log('收到 LINE 事件 ' + events.length + ' 筆：' + events.map(e => e.type + (e.message ? '/' + e.message.type : '') + (e.source ? '/' + e.source.type : '')).join(', '));
     if (events.length) ctx.waitUntil(forward(env, raw));
     return new Response('ok');
   }

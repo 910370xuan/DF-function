@@ -6,3 +6,7 @@ main = "index.js"
 compatibility_date = "2026-11-01"
 # 部署時保留後台設定的變數與密鑰
 keep_vars = true
+
+# 開啟記錄（Observability），在 Cloudflare 後台可看到每次 LINE 送來的請求與錯誤（免費額度每天 20 萬筆）
+[observability]
+enabled = true
