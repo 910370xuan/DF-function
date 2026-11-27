@@ -3,6 +3,11 @@ import assert from 'node:assert';
 import { createHmac } from 'node:crypto';
 import worker, { verifyLineSignature, forward } from '../worker/index.js';
 
+// Worker 的記錄輸出會干擾 node:test 的子程序通訊，測試時關掉
+console.log = () => {};
+console.warn = () => {};
+console.error = () => {};
+
 const SECRET = 'test-channel-secret';
 const sign = body => createHmac('sha256', SECRET).update(body).digest('base64');
 const body = JSON.stringify({ destination: 'U0', events: [{ type: 'message', webhookEventId: 'E1' }] });
