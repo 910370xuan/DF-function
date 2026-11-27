@@ -66,7 +66,8 @@ var CONFIG_DEFAULTS = [
   ['本公司人員', '', '公司同事的 LINE 名稱（逗號分隔），例如：李宗光,Jessica Tsai。他們在群組講的話不當訂單；他們私訊官方帳號替店家下單時，自動用「業務代訂」逐則判斷店家'],
   ['AI判讀', false, '勾選後，規則判斷不了的訊息交給 Claude 判讀（需先設定金鑰）'],
   ['AI模型', 'claude-opus-5-5', '可改 claude-haiku-5-5（較便宜）'],
-  ['AI思考強度', 'low', 'low / medium / high']
+  ['AI思考強度', 'low', 'low / medium / high'],
+  ['AI每月上限美元', 5, '本月 AI 估計費用超過這個金額就停止呼叫，改由客服判斷；0＝不限制（費用明細見「AI使用紀錄」）']
 ];
 
 /* ───────────── 選單與觸發 ───────────── */
@@ -79,6 +80,7 @@ function onOpen() {
     .addItem('解析測試（貼訊息試辨識）', 'runParseTest')
     .addItem('立即處理 LINE 訊息', 'menuProcessLine')
     .addItem('設定金鑰（LINE／Claude）', 'menuSetKeys')
+    .addItem('AI 連線測試', 'menuTestAi')
     .addItem('同步廠商清冊', 'syncVendors')
     .addItem('清理產單暫存試算表', 'cleanupTempSheets')
     .addItem('整理表格外觀', 'menuFormatSheets')

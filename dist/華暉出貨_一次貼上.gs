@@ -1,6 +1,6 @@
 /* 華暉出貨自動化：請整份貼進 Apps Script 的 Code.gs（取代原本內容）。由 scripts/bundle.js 產生，請勿手改。 */
 
-var APP_VERSION = '2026-11-27 06:21';
+var APP_VERSION = '2026-11-27 06:29';
 
 /**
  * 純邏輯（不呼叫任何 Google 服務），Apps Script 與 Node 測試共用。
@@ -986,7 +986,8 @@ var CONFIG_DEFAULTS = [
   ['本公司人員', '', '公司同事的 LINE 名稱（逗號分隔），例如：李宗光,Jessica Tsai。他們在群組講的話不當訂單；他們私訊官方帳號替店家下單時，自動用「業務代訂」逐則判斷店家'],
   ['AI判讀', false, '勾選後，規則判斷不了的訊息交給 Claude 判讀（需先設定金鑰）'],
   ['AI模型', 'claude-opus-5-5', '可改 claude-haiku-5-5（較便宜）'],
-  ['AI思考強度', 'low', 'low / medium / high']
+  ['AI思考強度', 'low', 'low / medium / high'],
+  ['AI每月上限美元', 5, '本月 AI 估計費用超過這個金額就停止呼叫，改由客服判斷；0＝不限制（費用明細見「AI使用紀錄」）']
 ];
 
 /* ───────────── 選單與觸發 ───────────── */
@@ -999,6 +1000,7 @@ function onOpen() {
     .addItem('解析測試（貼訊息試辨識）', 'runParseTest')
     .addItem('立即處理 LINE 訊息', 'menuProcessLine')
     .addItem('設定金鑰（LINE／Claude）', 'menuSetKeys')
+    .addItem('AI 連線測試', 'menuTestAi')
     .addItem('同步廠商清冊', 'syncVendors')
     .addItem('清理產單暫存試算表', 'cleanupTempSheets')
     .addItem('整理表格外觀', 'menuFormatSheets')
@@ -2363,6 +2365,8 @@ function aiSchema_(products) {
 function askClaude_(text, images, ctx, store) {
   var key = PropertiesService.getScriptProperties().getProperty('ANTHROPIC_API_KEY');
   if (!key) return { error: '尚未設定 Claude API 金鑰' };
+  var budget = Number(ctx.cfg['AI每月上限美元']);
+  if (budget > 0 && aiMonthCost_() >= budget) return { error: '本月 AI 預算 US$' + budget + ' 已用完，請客服判斷' };
   var model = String(ctx.cfg['AI模型'] || 'claude-opus-5-5').trim();
   var aliasText = '型號清單：' + ctx.products.join('、') + '\n客戶常用說法：' +
     ctx.aliases.map(function (a) { return a.alias + '→' + a.product + (a.pin ? '（' + a.pin + 'pin）' : ''); }).join('、');
@@ -2383,7 +2387,7 @@ function askClaude_(text, images, ctx, store) {
 
   var body = {
     model: model,
-    max_tokens: 4000,
+    max_tokens: 8000,
     system: [{ type: 'text', text: AI_SYSTEM_PROMPT + '\n\n' + aliasText }],
     messages: [{ role: 'user', content: content }],
     output_config: { effort: String(ctx.cfg['AI思考強度'] || 'low').trim(), format: { type: 'json_schema', schema: aiSchema_(ctx.products) } }
@@ -2407,6 +2411,7 @@ function askClaude_(text, images, ctx, store) {
     return { error: 'HTTP ' + code };
   }
   var json = JSON.parse(res.getContentText());
+  recordAiUsage_(json, model, text);
   if (json.stop_reason === 'refusal') return { error: 'AI 拒絕判讀' };
   if (json.stop_reason === 'max_tokens') return { error: '回應過長被截斷' };
   var block = (json.content || []).filter(function (b) { return b.type === 'text'; })[0];
@@ -2424,6 +2429,53 @@ function askClaude_(text, images, ctx, store) {
     valid.push({ product: it.product, qty: q, pin8: it.product === 'DCB-6000' ? p8 : 0 });
   });
   return { is_order: !!out.is_order, items: valid, concerns: concerns, notes: String(out.notes || '').trim() };
+}
+
+/* ───────────── AI 費用控管 ───────────── */
+
+// 每百萬 tokens 的美元價格（輸入、輸出）；其他模型以 Opus 計，寧可高估
+var AI_PRICES = {
+  'claude-opus-5-5': [4, 20], 'claude-sonnet-5-5': [2, 10], 'claude-haiku-5-5': [0.10, 0.50]
+};
+var AI_LOG_HEADERS = ['時間', '模型', '輸入tokens', '輸出tokens', '估計費用USD', '訊息摘要'];
+
+function aiCostOf_(usage, model) {
+  var p = AI_PRICES[model] || AI_PRICES['claude-opus-5-5'];
+  var u = usage || {};
+  var input = (u.input_tokens || 0) + (u.cache_creation_input_tokens || 0) * 1.25 + (u.cache_read_input_tokens || 0) * 0.1;
+  return (input * p[0] + (u.output_tokens || 0) * p[1]) / 1e6;
+}
+
+function recordAiUsage_(json, model, text) {
+  try {
+    var u = json.usage || {};
+    var cost = aiCostOf_(u, json.model || model);
+    var props = PropertiesService.getScriptProperties();
+    var key = 'aiCost:' + Utilities.formatDate(new Date(), TZ, 'yyyy-MM');
+    props.setProperty(key, String((Number(props.getProperty(key)) || 0) + cost));
+    ensureSheet_('AI使用紀錄', AI_LOG_HEADERS).appendRow([new Date(), json.model || model, u.input_tokens || 0, u.output_tokens || 0,
+      Math.round(cost * 10000) / 10000, String(text || '').slice(0, 60)]);
+  } catch (e) { console.error('記錄 AI 用量失敗', e); }
+}
+
+function aiMonthCost_() {
+  return Number(PropertiesService.getScriptProperties().getProperty('aiCost:' + Utilities.formatDate(new Date(), TZ, 'yyyy-MM'))) || 0;
+}
+
+/** 選單：用範例訊息實際呼叫一次，確認金鑰與設定可用 */
+function menuTestAi() {
+  var cfg = readConfig_();
+  var ctx = { cfg: cfg, aliases: readAliases_(), products: unique_(readProducts_()), history: [] };
+  var sample = '老闆我要訂小電池A款十顆，另外直流的也來兩顆8pin，不用工具';
+  var started = Date.now();
+  var r = askClaude_(sample, [], ctx, '');
+  var secs = ((Date.now() - started) / 1000).toFixed(1);
+  if (r.error) { showResult_({ message: '❌ AI 呼叫失敗：' + r.error + '\n\n請確認「設定金鑰」裡的 Claude 金鑰，以及 Claude Console 是否已儲值。' }); return; }
+  showResult_({ message: '✅ AI 連線正常（' + secs + ' 秒）\n\n範例：' + sample + '\n判讀：' +
+    (r.items.map(function (it) { return it.product + ' × ' + it.qty + (it.pin8 ? '（8pin ' + it.pin8 + '）' : ''); }).join('、') || '（無品項）') +
+    (r.concerns.length ? '\n疑點：' + r.concerns.join('；') : '') +
+    '\n\n模型：' + (cfg['AI模型'] || 'claude-opus-5-5') + '\n本月累計估計費用：US$' + aiMonthCost_().toFixed(4) +
+    '（上限 US$' + (Number(cfg['AI每月上限美元']) || '不限') + '）' });
 }
 
 /* ───────────── 金鑰 ───────────── */
@@ -2967,10 +3019,10 @@ function buildOverview_() {
 function arrangeTabs_() {
   var ss = SpreadsheetApp.getActive();
   var order = ['總覽', SHEET.ORDERS, LINE_SHEET.TRIAL, LINE_SHEET.BIND, NEW_SHEET, SHEET.CONFIG, SHEET.ALIASES, SHEET.HOLIDAYS, SHEET.PARSE_TEST,
-    LINE_SHEET.LOG, SHEET.BATCHES, SHEET.INVOICE, SHEET.LABEL, SHEET.VENDORS];
+    LINE_SHEET.LOG, 'AI使用紀錄', SHEET.BATCHES, SHEET.INVOICE, SHEET.LABEL, SHEET.VENDORS];
   var colors = {};
   colors[SHEET.ORDERS] = '#2f7d4f'; colors[LINE_SHEET.TRIAL] = '#7fa8ee'; colors[LINE_SHEET.BIND] = '#f6c453'; colors[NEW_SHEET] = '#a3620a';
-  [LINE_SHEET.LOG, SHEET.BATCHES, SHEET.INVOICE, SHEET.LABEL, SHEET.VENDORS].forEach(function (n) { colors[n] = '#9aa3af'; });
+  [LINE_SHEET.LOG, 'AI使用紀錄', SHEET.BATCHES, SHEET.INVOICE, SHEET.LABEL, SHEET.VENDORS].forEach(function (n) { colors[n] = '#9aa3af'; });
   var pos = 1;
   order.forEach(function (name) {
     var sh = ss.getSheetByName(name);

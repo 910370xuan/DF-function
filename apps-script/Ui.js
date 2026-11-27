@@ -172,10 +172,10 @@ function buildOverview_() {
 function arrangeTabs_() {
   var ss = SpreadsheetApp.getActive();
   var order = ['總覽', SHEET.ORDERS, LINE_SHEET.TRIAL, LINE_SHEET.BIND, NEW_SHEET, SHEET.CONFIG, SHEET.ALIASES, SHEET.HOLIDAYS, SHEET.PARSE_TEST,
-    LINE_SHEET.LOG, SHEET.BATCHES, SHEET.INVOICE, SHEET.LABEL, SHEET.VENDORS];
+    LINE_SHEET.LOG, 'AI使用紀錄', SHEET.BATCHES, SHEET.INVOICE, SHEET.LABEL, SHEET.VENDORS];
   var colors = {};
   colors[SHEET.ORDERS] = '#2f7d4f'; colors[LINE_SHEET.TRIAL] = '#7fa8ee'; colors[LINE_SHEET.BIND] = '#f6c453'; colors[NEW_SHEET] = '#a3620a';
-  [LINE_SHEET.LOG, SHEET.BATCHES, SHEET.INVOICE, SHEET.LABEL, SHEET.VENDORS].forEach(function (n) { colors[n] = '#9aa3af'; });
+  [LINE_SHEET.LOG, 'AI使用紀錄', SHEET.BATCHES, SHEET.INVOICE, SHEET.LABEL, SHEET.VENDORS].forEach(function (n) { colors[n] = '#9aa3af'; });
   var pos = 1;
   order.forEach(function (name) {
     var sh = ss.getSheetByName(name);
