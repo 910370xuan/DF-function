@@ -222,3 +222,27 @@ test('庫存管理出庫紀錄：每行一列，10+1 另列特贈', () => {
     ['D', '', '出庫', '小電池工具組', 3, '系統', 'B2B廠商', '格錸車業', '到付', '單據 20BF11000000072／批次 20261127-01', 90]
   ]);
 });
+
+test('回收統計表：月份區塊、欄位、折貨款', () => {
+  const A = ['11月電力盒回收統計', '回收日期', '11/9', '11/9', '', '小計', '', '12月電力盒回收統計', '回收日期', '', '小計'];
+  assert.deepStrictEqual(Core.findRecycleBlocks(A), [
+    { month: 11, titleRow: 1, headerRow: 2, firstRow: 3, subtotalRow: 6 },
+    { month: 12, titleRow: 8, headerRow: 9, firstRow: 10, subtotalRow: 11 }
+  ]);
+  const cols = Core.recycleColumns(['回收日期', '客戶名稱', '完整版_數量', '完整版_小計', '損壞缺件_數量', '損壞缺件_小計', '總金額', '匯款日期', '備註', '已匯款/折抵']);
+  assert.deepStrictEqual(cols, { date: 0, store: 1, qty: 2, total: 6, note: 8, done: 9 });
+  const rows = [
+    { row: 11, store: '麒鎮車業行', total: 1100, note: '折貨款', done: false },
+    { row: 12, store: '麒鎮車業行', total: 500, note: '折貨款', done: true },
+    { row: 13, store: '麒鎮車業行', total: 300, note: '折貨款（已於 11/27 單據 X 折抵）', done: false },
+    { row: 14, store: '麒鎮車業行', total: 900, note: 'ALEX代墊', done: false },
+    { row: 15, store: '格錸車業', total: 1500, note: '折貨款', done: false }
+  ];
+  assert.deepStrictEqual(Core.recycleCredits(rows, '麒鎮車業行').map(r => r.row), [11]);
+});
+
+test('小計公式範圍延伸', () => {
+  assert.strictEqual(Core.extendRangeEnd('=SUM(C3:C13)', 13), '=SUM(C3:C14)');
+  assert.strictEqual(Core.extendRangeEnd('=SUM($G$3:$G$13)+SUM(D3:D12)', 13), '=SUM($G$3:$G$14)+SUM(D3:D12)');
+  assert.strictEqual(Core.extendRangeEnd('', 13), '');
+});

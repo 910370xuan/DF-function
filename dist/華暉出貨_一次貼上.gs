@@ -1,6 +1,6 @@
 /* 華暉出貨自動化：請整份貼進 Apps Script 的 Code.gs（取代原本內容）。由 scripts/bundle.js 產生，請勿手改。 */
 
-var APP_VERSION = '2026-11-27 05:14';
+var APP_VERSION = '2026-11-27 05:20';
 
 /**
  * 純邏輯（不呼叫任何 Google 服務），Apps Script 與 Node 測試共用。
@@ -225,6 +225,53 @@ var Core = (function () {
     return rows;
   }
 
+  /**
+   * 主檔「N月電力盒回收統計」：在 A 欄找各月份區塊。
+   * colA：A 欄值（由第 1 列起）→ [{ month, titleRow, headerRow, firstRow, subtotalRow }]（列號從 1 起）
+   */
+  function findRecycleBlocks(colA) {
+    var blocks = [];
+    for (var i = 0; i < colA.length; i++) {
+      var m = String(colA[i] == null ? '' : colA[i]).match(/(\d{1,2})\s*月.*回收/);
+      if (!m) continue;
+      var b = { month: Number(m[1]), titleRow: i + 1, headerRow: i + 2, firstRow: i + 3, subtotalRow: 0 };
+      for (var j = i + 2; j < colA.length; j++) {
+        if (String(colA[j]).replace(/\s/g, '') === '小計') { b.subtotalRow = j + 1; break; }
+        if (/(\d{1,2})\s*月.*回收/.test(String(colA[j]))) break;
+      }
+      blocks.push(b);
+    }
+    return blocks;
+  }
+
+  /**
+   * 在「小計」上方插入一列後，小計公式的範圍不會自動包含新列（例如 SUM(C3:C13) 插在第 14 列）。
+   * 把結尾是 lastRow 的範圍延伸到 lastRow + 1。
+   */
+  function extendRangeEnd(formula, lastRow) {
+    return String(formula).replace(/(\$?[A-Z]{1,3}\$?)(\d+)(\s*:\s*)(\$?[A-Z]{1,3}\$?)(\d+)/g, function (all, c1, r1, sep, c2, r2) {
+      return Number(r2) === lastRow ? c1 + r1 + sep + c2 + (lastRow + 1) : all;
+    });
+  }
+
+  /** 依標題列找欄位位置（從 0 起），找不到為 -1 */
+  function recycleColumns(header) {
+    var find = function (re) { for (var i = 0; i < header.length; i++) if (re.test(String(header[i]))) return i; return -1; };
+    return { date: find(/回收日期/), store: find(/客戶名稱/), qty: find(/完整版.*數量/), total: find(/總金額/), note: find(/備註/), done: find(/已匯款|已折抵|匯款\s*\/\s*折抵/) };
+  }
+
+  /**
+   * 要在這次出貨單折抵的回收：備註含「折貨款」、打勾欄未勾、還沒被系統折抵過（備註沒有「已於」）
+   * rows：[{ row, store, total, note, done }]
+   */
+  function recycleCredits(rows, store) {
+    var key = storeKey(store);
+    return rows.filter(function (r) {
+      return r.store && storeKey(r.store) === key && /折貨款/.test(String(r.note)) && r.done !== true &&
+        !/已於/.test(String(r.note)) && Number(r.total) > 0;
+    });
+  }
+
   /** 貨運單：每張工作表 6 格（2 頁 × 3 格），8 家 → [[6 家], [2 家]] → 3+3+2 頁 */
   function chunkLabels(stores) {
     var out = [];
@@ -353,6 +400,10 @@ var Core = (function () {
     buildNote: buildNote,
     buildGroups: buildGroups,
     ledgerRows: ledgerRows,
+    findRecycleBlocks: findRecycleBlocks,
+    recycleColumns: recycleColumns,
+    extendRangeEnd: extendRangeEnd,
+    recycleCredits: recycleCredits,
     mergeSameProduct: mergeSameProduct,
     chunkLabels: chunkLabels,
     labelPagesFor: labelPagesFor,
@@ -927,7 +978,7 @@ var CONFIG_DEFAULTS = [
   ['強制合併時間', '15:50', '這個時間到當日截止之間，不等待、直接處理所有訊息'],
   ['接近截止提醒分鐘', 30, '截止前幾分鐘內下的單標成待確認'],
   ['待確認提醒時間', '15:30', '寄出待確認清單與「不是訂單」訊息清單'],
-  ['記錄回收', false, '勾選後「XX回收電力盒*N」會記到「回收紀錄」表；不勾選只標記為不是訂單'],
+  ['記錄回收', true, '「XX回收電力盒*N」寫入主檔「N月電力盒回收統計」（日期、客戶、數量）；備註「折貨款」且未打勾的，下次產單自動折抵'],
   ['自動寫入庫存管理', true, '產單後把出庫（含 10+1 特贈）接在主檔「庫存管理」最後面，建檔人員為「系統」；不會修改既有資料'],
   ['新客戶價格組合', 'A', '新客戶建檔草稿的預設價格組合'],
   ['新客戶要工具價格組合', 'B', '新客戶第一張訂單要工具時'],
@@ -1038,6 +1089,7 @@ function runBatch_(type, opts) {
       return { ok: true, message: msg };
     }
 
+    var recycleNote = truthy_(cfg['記錄回收']) && mainIds_()[0] ? applyRecycleCredits_(built.groups) : '';
     var batchId = Core.nextBatchId(today, readBatchIds_());
     var state = { month: String(cfg['單據編號月份'] || ''), last: Number(cfg['單據編號最後流水號']) || 0 };
     built.groups.forEach(function (g) {
@@ -1078,7 +1130,8 @@ function runBatch_(type, opts) {
       Session.getEffectiveUser().getEmail(), url(lblXlsx)
     ]);
 
-    var ledgerNote = '';
+    try { markRecycleUsed_(built.groups, today); } catch (e) { recycleNote += '<p>⚠ 回收統計備註註明失敗，請手動註明已折抵：' + esc_(e && e.message || e) + '</p>'; }
+    var ledgerNote = recycleNote;
     if (truthy_(cfg['自動寫入庫存管理']) && mainIds_()[0]) {
       try { ledgerNote = '<p>已寫入主檔「庫存管理」' + appendLedger_(built.groups, today, batchId, cfg) + ' 列（建檔人員：系統）。</p>'; }
       catch (e) { ledgerNote = '<p>⚠ 寫入庫存管理失敗，請手動登記：' + esc_(e && e.message || e) + '</p>'; }
@@ -1619,6 +1672,13 @@ function setupCore_() {
 
   var cfg = ensureSheet_(SHEET.CONFIG, ['項目', '值', '說明']);
   var obsolete = ['出貨單第一聯列', '出貨單第二聯列', '列印欄數', '出貨單PDF參數', '貨運單PDF參數', '出貨單列印設定', '貨運單列印設定', 'PDF字型', '出貨單字型', '貨運單字型'];
+  // 回收改為寫入主檔回收統計：舊版預設不勾選的「記錄回收」改為勾選一次
+  if (!PropertiesService.getScriptProperties().getProperty('recycle2')) {
+    for (var ry = 2; ry <= cfg.getLastRow(); ry++) {
+      if (cfg.getRange(ry, 1).getValue() === '記錄回收') cfg.getRange(ry, 2, 1, 2).setValues([[true, '「XX回收電力盒*N」寫入主檔「N月電力盒回收統計」（日期、客戶、數量）；備註「折貨款」且未打勾的，下次產單自動折抵']]);
+    }
+    PropertiesService.getScriptProperties().setProperty('recycle2', '1');
+  }
   // 改為只出 PDF：舊版預設勾選的「輸出Excel」取消一次
   if (!PropertiesService.getScriptProperties().getProperty('pdfOnly1')) {
     for (var rx = 2; rx <= cfg.getLastRow(); rx++) {
@@ -1980,15 +2040,18 @@ function handleSegment_(seg, ctx, log) {
     if (!store) storeNote = '這個帳號／群組綁了多家店（' + bound.join('、') + '），訊息沒寫是哪一家，請選擇店家';
   }
   if (res.kind === 'recycle') {
-    // 回收不是訂單；目前不處理，只在訊息紀錄標記（設定勾「記錄回收」才寫入回收紀錄表）
+    // 回收不是訂單：寫入主檔當月回收統計（日期、客戶、數量），打勾留給人工
     if (!truthy_(cfg['記錄回收'])) { mark('回收（不處理）'); return 'recycle'; }
-    var st = store || Parser.matchStore(text, ctx.vendorInfo) || '';
-    var rsh = ensureSheet_(LINE_SHEET.RECYCLE, RECYCLE_HEADERS);
-    var rrows = res.items.map(function (it) {
-      return [new Date(first.ts), st, it.product, it.qty, text.slice(0, 200), 'LINE|' + seg.userId + '|' + segId, '待處理', st ? '' : '請選擇店家'];
-    });
-    rsh.getRange(rsh.getLastRow() + 1, 1, rrows.length, RECYCLE_HEADERS.length).setValues(rrows);
-    mark('回收');
+    var rStore = store || Parser.matchStore(text, ctx.vendorInfo) || (text.split('回收')[0] || '').trim();
+    var qty = res.items.reduce(function (a, it) { return a + it.qty; }, 0);
+    var p = recvDate.split('-').map(Number);
+    try {
+      var where = recordRecycle_(new Date(p[0], p[1] - 1, p[2]), rStore, qty);
+      mark('回收：已寫入 ' + where);
+    } catch (e) {
+      mark('回收：寫入失敗');
+      notify_('【出貨】回收未能寫入主檔', '<p>' + esc_(rStore + ' 回收 ' + qty + ' 個：' + (e && e.message || e)) + '</p><p>原文：' + esc_(text) + '</p><p>請手動登記到回收統計。</p>', []);
+    }
     return 'recycle';
   }
   var items = res.items.slice(), reasons = res.reasons.slice(), notes = res.notes.slice();
@@ -2550,6 +2613,123 @@ function formatNewCustomerSheet_(sh) {
 
 
 /**
+ * 電力盒回收：寫入主檔「N月電力盒回收統計」，並在下次出貨單折抵「折貨款」。
+ * 只寫入日期、客戶名稱、完整版數量；打勾欄留給人工確認。
+ * 備註含「折貨款」且未打勾 → 下次產單時把總金額填入折讓，並在備註加註「已於…折抵」避免重複。
+ * 打勾欄已勾 → 已處理完成，系統不動。
+ */
+
+/** 主檔裡所有回收統計區塊 */
+function recycleBlocks_() {
+  var id = mainIds_()[0];
+  if (!id) throw new Error('請先在「設定」填入主檔試算表ID');
+  var out = [];
+  SpreadsheetApp.openById(id).getSheets().forEach(function (sh) {
+    var n = Math.min(sh.getLastRow(), 600);
+    if (n < 2) return;
+    var colA = sh.getRange(1, 1, n, 1).getDisplayValues().map(function (r) { return r[0]; });
+    Core.findRecycleBlocks(colA).forEach(function (b) {
+      if (!b.subtotalRow) return;
+      var width = Math.max(sh.getLastColumn(), 10);
+      b.sheet = sh;
+      b.cols = Core.recycleColumns(sh.getRange(b.headerRow, 1, 1, width).getDisplayValues()[0]);
+      if (b.cols.store >= 0 && b.cols.qty >= 0) out.push(b);
+    });
+  });
+  return out;
+}
+
+/** 回收寫入當月區塊的下一個空白列；沒有空白列時在「小計」上方插入一列（沿用上一列的公式與格式） */
+function recordRecycle_(date, store, qty) {
+  var month = date.getMonth() + 1;
+  var blocks = recycleBlocks_().filter(function (b) { return b.month === month; });
+  if (!blocks.length) throw new Error('主檔找不到「' + month + '月電力盒回收統計」，請先建立當月的表');
+  var b = blocks[blocks.length - 1];
+  var sh = b.sheet, c = b.cols;
+  var lock = LockService.getScriptLock();
+  lock.waitLock(30000);
+  try {
+    var target = 0;
+    if (b.subtotalRow > b.firstRow) {
+      var vals = sh.getRange(b.firstRow, 1, b.subtotalRow - b.firstRow, Math.max(c.store, c.qty) + 1).getValues();
+      for (var i = 0; i < vals.length; i++) {
+        if (!String(vals[i][c.store]).trim() && !String(vals[i][c.qty]).trim() && (c.date < 0 || !String(vals[i][c.date]).trim())) { target = b.firstRow + i; break; }
+      }
+    }
+    if (!target) {
+      var oldSub = b.subtotalRow;
+      sh.insertRowBefore(oldSub);
+      target = oldSub;
+      // 小計列下移一列；把它的 SUM 範圍延伸到新列
+      var subRange = sh.getRange(oldSub + 1, 1, 1, sh.getLastColumn());
+      var subF = subRange.getFormulas()[0];
+      subF.forEach(function (fx, k) {
+        if (fx) { var nf = Core.extendRangeEnd(fx, oldSub - 1); if (nf !== fx) sh.getRange(oldSub + 1, k + 1).setFormula(nf); }
+      });
+      var prev = target - 1;
+      if (prev >= b.firstRow) {
+        sh.getRange(prev, 1, 1, sh.getLastColumn()).copyTo(sh.getRange(target, 1, 1, sh.getLastColumn()));
+        // 只保留公式、格式與打勾框，清掉上一列的資料
+        var row = sh.getRange(target, 1, 1, sh.getLastColumn());
+        var f = row.getFormulas()[0];
+        f.forEach(function (x, k) { if (!x && k !== c.done) sh.getRange(target, k + 1).clearContent(); });
+        if (c.done >= 0) sh.getRange(target, c.done + 1).setValue(false);
+      }
+    }
+    if (c.date >= 0) sh.getRange(target, c.date + 1).setValue(date);
+    sh.getRange(target, c.store + 1).setValue(store);
+    sh.getRange(target, c.qty + 1).setValue(qty);
+    return sh.getName() + ' 第 ' + target + ' 列';
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+/** 所有區塊中的回收資料列 */
+function readRecycleRows_() {
+  var rows = [];
+  recycleBlocks_().forEach(function (b) {
+    if (b.subtotalRow <= b.firstRow) return;
+    var c = b.cols;
+    var width = Math.max(c.store, c.total, c.note, c.done) + 1;
+    b.sheet.getRange(b.firstRow, 1, b.subtotalRow - b.firstRow, width).getValues().forEach(function (r, i) {
+      rows.push({
+        sheet: b.sheet, row: b.firstRow + i, noteCol: c.note,
+        store: String(r[c.store] || '').trim(), total: c.total >= 0 ? r[c.total] : 0,
+        note: c.note >= 0 ? String(r[c.note] || '') : '', done: c.done >= 0 ? r[c.done] === true : false
+      });
+    });
+  });
+  return rows;
+}
+
+/** 產單前：把「折貨款」加到各店的折讓金額 */
+function applyRecycleCredits_(groups) {
+  var rows;
+  try { rows = readRecycleRows_(); } catch (e) { console.error('讀取回收統計失敗', e); return ''; }
+  var lines = [];
+  groups.forEach(function (g) {
+    var credits = Core.recycleCredits(rows, g.store).filter(function (r) { return r.noteCol >= 0; });
+    if (!credits.length) return;
+    var sum = credits.reduce(function (a, r) { return a + Number(r.total); }, 0);
+    g.discount = (Number(g.discount) || 0) + sum;
+    g.recycleUsed = credits;
+    lines.push(g.store + ' 折抵回收貨款 ' + sum + ' 元');
+  });
+  return lines.length ? '<p>♻ 回收折貨款已填入折讓金額：' + lines.map(esc_).join('、') + '（已在回收統計備註註明；確認後請手動打勾）</p>' : '';
+}
+
+/** 產單成功後：在回收統計備註註明已折抵，避免下次重複折抵（打勾仍由人工） */
+function markRecycleUsed_(groups, today) {
+  groups.forEach(function (g) {
+    (g.recycleUsed || []).forEach(function (r) {
+      r.sheet.getRange(r.row, r.noteCol + 1).setValue(r.note + '（已於 ' + today.slice(5).replace('-', '/') + ' 單據 ' + g.orderNo + ' 折抵）');
+    });
+  });
+}
+
+
+/**
  * 表格外觀與操作：狀態顏色、隱藏技術欄位、「確認」勾選、總覽頁。
  * 只改外觀與輔助功能，不影響資料欄位的位置。
  */
@@ -2599,16 +2779,6 @@ function formatSheets_() {
       .requireValueInList(['4', '8'], true).setAllowInvalid(true).build());
   });
   step('新客戶待建檔', function () { formatNewCustomerSheet_(ensureSheet_(NEW_SHEET, NEW_HEADERS)); });
-  step('回收紀錄', function () {
-    if (!truthy_(readConfig_()['記錄回收'])) return; // 目前不處理回收，不建立這張表
-    var sh = ensureSheet_(LINE_SHEET.RECYCLE, RECYCLE_HEADERS);
-    formatSimple_(sh, { 1: 140, 2: 180, 3: 120, 4: 60, 5: 320, 6: 60, 7: 90, 8: 160 }, [6]);
-    sh.getRange(2, 1, sh.getMaxRows() - 1, 1).setNumberFormat('mm/dd hh:mm');
-    sh.getRange(2, 2, sh.getMaxRows() - 1, 1).setDataValidation(SpreadsheetApp.newDataValidation()
-      .requireValueInRange(ss.getSheetByName(SHEET.VENDORS).getRange('C2:C'), true).setAllowInvalid(true).build());
-    sh.getRange(2, 7, sh.getMaxRows() - 1, 1).setDataValidation(SpreadsheetApp.newDataValidation()
-      .requireValueInList(['待處理', '已驗收', '已折抵', '取消'], true).setAllowInvalid(true).build());
-  });
   step('訊息紀錄', function () { formatSimple_(ss.getSheetByName(LINE_SHEET.LOG), { 1: 150, 2: 60, 3: 60, 4: 70, 5: 440, 6: 60, 7: 90, 8: 60, 9: 110 }, [2, 3, 6, 8]); });
   step('批次紀錄', function () { formatSimple_(ss.getSheetByName(SHEET.BATCHES), { 1: 120, 2: 150, 3: 80, 4: 80, 5: 280, 6: 130, 7: 130, 8: 130, 9: 170, 10: 130 }, []); });
   step('設定', function () { formatConfig_(ss.getSheetByName(SHEET.CONFIG)); });
@@ -2733,7 +2903,7 @@ function buildOverview_() {
 function arrangeTabs_() {
   var ss = SpreadsheetApp.getActive();
   var order = ['總覽', SHEET.ORDERS, LINE_SHEET.TRIAL, LINE_SHEET.BIND, NEW_SHEET, SHEET.CONFIG, SHEET.ALIASES, SHEET.HOLIDAYS, SHEET.PARSE_TEST,
-    LINE_SHEET.RECYCLE, LINE_SHEET.LOG, SHEET.BATCHES, SHEET.INVOICE, SHEET.LABEL, SHEET.VENDORS];
+    LINE_SHEET.LOG, SHEET.BATCHES, SHEET.INVOICE, SHEET.LABEL, SHEET.VENDORS];
   var colors = {};
   colors[SHEET.ORDERS] = '#2f7d4f'; colors[LINE_SHEET.TRIAL] = '#7fa8ee'; colors[LINE_SHEET.BIND] = '#f6c453'; colors[NEW_SHEET] = '#a3620a';
   [LINE_SHEET.LOG, SHEET.BATCHES, SHEET.INVOICE, SHEET.LABEL, SHEET.VENDORS].forEach(function (n) { colors[n] = '#9aa3af'; });

@@ -204,15 +204,18 @@ function handleSegment_(seg, ctx, log) {
     if (!store) storeNote = '這個帳號／群組綁了多家店（' + bound.join('、') + '），訊息沒寫是哪一家，請選擇店家';
   }
   if (res.kind === 'recycle') {
-    // 回收不是訂單；目前不處理，只在訊息紀錄標記（設定勾「記錄回收」才寫入回收紀錄表）
+    // 回收不是訂單：寫入主檔當月回收統計（日期、客戶、數量），打勾留給人工
     if (!truthy_(cfg['記錄回收'])) { mark('回收（不處理）'); return 'recycle'; }
-    var st = store || Parser.matchStore(text, ctx.vendorInfo) || '';
-    var rsh = ensureSheet_(LINE_SHEET.RECYCLE, RECYCLE_HEADERS);
-    var rrows = res.items.map(function (it) {
-      return [new Date(first.ts), st, it.product, it.qty, text.slice(0, 200), 'LINE|' + seg.userId + '|' + segId, '待處理', st ? '' : '請選擇店家'];
-    });
-    rsh.getRange(rsh.getLastRow() + 1, 1, rrows.length, RECYCLE_HEADERS.length).setValues(rrows);
-    mark('回收');
+    var rStore = store || Parser.matchStore(text, ctx.vendorInfo) || (text.split('回收')[0] || '').trim();
+    var qty = res.items.reduce(function (a, it) { return a + it.qty; }, 0);
+    var p = recvDate.split('-').map(Number);
+    try {
+      var where = recordRecycle_(new Date(p[0], p[1] - 1, p[2]), rStore, qty);
+      mark('回收：已寫入 ' + where);
+    } catch (e) {
+      mark('回收：寫入失敗');
+      notify_('【出貨】回收未能寫入主檔', '<p>' + esc_(rStore + ' 回收 ' + qty + ' 個：' + (e && e.message || e)) + '</p><p>原文：' + esc_(text) + '</p><p>請手動登記到回收統計。</p>', []);
+    }
     return 'recycle';
   }
   var items = res.items.slice(), reasons = res.reasons.slice(), notes = res.notes.slice();

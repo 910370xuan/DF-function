@@ -48,16 +48,6 @@ function formatSheets_() {
       .requireValueInList(['4', '8'], true).setAllowInvalid(true).build());
   });
   step('新客戶待建檔', function () { formatNewCustomerSheet_(ensureSheet_(NEW_SHEET, NEW_HEADERS)); });
-  step('回收紀錄', function () {
-    if (!truthy_(readConfig_()['記錄回收'])) return; // 目前不處理回收，不建立這張表
-    var sh = ensureSheet_(LINE_SHEET.RECYCLE, RECYCLE_HEADERS);
-    formatSimple_(sh, { 1: 140, 2: 180, 3: 120, 4: 60, 5: 320, 6: 60, 7: 90, 8: 160 }, [6]);
-    sh.getRange(2, 1, sh.getMaxRows() - 1, 1).setNumberFormat('mm/dd hh:mm');
-    sh.getRange(2, 2, sh.getMaxRows() - 1, 1).setDataValidation(SpreadsheetApp.newDataValidation()
-      .requireValueInRange(ss.getSheetByName(SHEET.VENDORS).getRange('C2:C'), true).setAllowInvalid(true).build());
-    sh.getRange(2, 7, sh.getMaxRows() - 1, 1).setDataValidation(SpreadsheetApp.newDataValidation()
-      .requireValueInList(['待處理', '已驗收', '已折抵', '取消'], true).setAllowInvalid(true).build());
-  });
   step('訊息紀錄', function () { formatSimple_(ss.getSheetByName(LINE_SHEET.LOG), { 1: 150, 2: 60, 3: 60, 4: 70, 5: 440, 6: 60, 7: 90, 8: 60, 9: 110 }, [2, 3, 6, 8]); });
   step('批次紀錄', function () { formatSimple_(ss.getSheetByName(SHEET.BATCHES), { 1: 120, 2: 150, 3: 80, 4: 80, 5: 280, 6: 130, 7: 130, 8: 130, 9: 170, 10: 130 }, []); });
   step('設定', function () { formatConfig_(ss.getSheetByName(SHEET.CONFIG)); });
@@ -182,7 +172,7 @@ function buildOverview_() {
 function arrangeTabs_() {
   var ss = SpreadsheetApp.getActive();
   var order = ['總覽', SHEET.ORDERS, LINE_SHEET.TRIAL, LINE_SHEET.BIND, NEW_SHEET, SHEET.CONFIG, SHEET.ALIASES, SHEET.HOLIDAYS, SHEET.PARSE_TEST,
-    LINE_SHEET.RECYCLE, LINE_SHEET.LOG, SHEET.BATCHES, SHEET.INVOICE, SHEET.LABEL, SHEET.VENDORS];
+    LINE_SHEET.LOG, SHEET.BATCHES, SHEET.INVOICE, SHEET.LABEL, SHEET.VENDORS];
   var colors = {};
   colors[SHEET.ORDERS] = '#2f7d4f'; colors[LINE_SHEET.TRIAL] = '#7fa8ee'; colors[LINE_SHEET.BIND] = '#f6c453'; colors[NEW_SHEET] = '#a3620a';
   [LINE_SHEET.LOG, SHEET.BATCHES, SHEET.INVOICE, SHEET.LABEL, SHEET.VENDORS].forEach(function (n) { colors[n] = '#9aa3af'; });

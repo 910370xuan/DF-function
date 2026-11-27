@@ -221,6 +221,53 @@ var Core = (function () {
     return rows;
   }
 
+  /**
+   * 主檔「N月電力盒回收統計」：在 A 欄找各月份區塊。
+   * colA：A 欄值（由第 1 列起）→ [{ month, titleRow, headerRow, firstRow, subtotalRow }]（列號從 1 起）
+   */
+  function findRecycleBlocks(colA) {
+    var blocks = [];
+    for (var i = 0; i < colA.length; i++) {
+      var m = String(colA[i] == null ? '' : colA[i]).match(/(\d{1,2})\s*月.*回收/);
+      if (!m) continue;
+      var b = { month: Number(m[1]), titleRow: i + 1, headerRow: i + 2, firstRow: i + 3, subtotalRow: 0 };
+      for (var j = i + 2; j < colA.length; j++) {
+        if (String(colA[j]).replace(/\s/g, '') === '小計') { b.subtotalRow = j + 1; break; }
+        if (/(\d{1,2})\s*月.*回收/.test(String(colA[j]))) break;
+      }
+      blocks.push(b);
+    }
+    return blocks;
+  }
+
+  /**
+   * 在「小計」上方插入一列後，小計公式的範圍不會自動包含新列（例如 SUM(C3:C13) 插在第 14 列）。
+   * 把結尾是 lastRow 的範圍延伸到 lastRow + 1。
+   */
+  function extendRangeEnd(formula, lastRow) {
+    return String(formula).replace(/(\$?[A-Z]{1,3}\$?)(\d+)(\s*:\s*)(\$?[A-Z]{1,3}\$?)(\d+)/g, function (all, c1, r1, sep, c2, r2) {
+      return Number(r2) === lastRow ? c1 + r1 + sep + c2 + (lastRow + 1) : all;
+    });
+  }
+
+  /** 依標題列找欄位位置（從 0 起），找不到為 -1 */
+  function recycleColumns(header) {
+    var find = function (re) { for (var i = 0; i < header.length; i++) if (re.test(String(header[i]))) return i; return -1; };
+    return { date: find(/回收日期/), store: find(/客戶名稱/), qty: find(/完整版.*數量/), total: find(/總金額/), note: find(/備註/), done: find(/已匯款|已折抵|匯款\s*\/\s*折抵/) };
+  }
+
+  /**
+   * 要在這次出貨單折抵的回收：備註含「折貨款」、打勾欄未勾、還沒被系統折抵過（備註沒有「已於」）
+   * rows：[{ row, store, total, note, done }]
+   */
+  function recycleCredits(rows, store) {
+    var key = storeKey(store);
+    return rows.filter(function (r) {
+      return r.store && storeKey(r.store) === key && /折貨款/.test(String(r.note)) && r.done !== true &&
+        !/已於/.test(String(r.note)) && Number(r.total) > 0;
+    });
+  }
+
   /** 貨運單：每張工作表 6 格（2 頁 × 3 格），8 家 → [[6 家], [2 家]] → 3+3+2 頁 */
   function chunkLabels(stores) {
     var out = [];
@@ -349,6 +396,10 @@ var Core = (function () {
     buildNote: buildNote,
     buildGroups: buildGroups,
     ledgerRows: ledgerRows,
+    findRecycleBlocks: findRecycleBlocks,
+    recycleColumns: recycleColumns,
+    extendRangeEnd: extendRangeEnd,
+    recycleCredits: recycleCredits,
     mergeSameProduct: mergeSameProduct,
     chunkLabels: chunkLabels,
     labelPagesFor: labelPagesFor,

@@ -13,6 +13,7 @@ const out = [
   read('Main.js'),
   read('Line.js'),
   read('Customers.js'),
+  read('Recycle.js'),
   read('Ui.js')
 ].join('\n\n');
 fs.mkdirSync(path.join(root, 'dist'), { recursive: true });

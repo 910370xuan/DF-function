@@ -58,7 +58,7 @@ var CONFIG_DEFAULTS = [
   ['強制合併時間', '15:50', '這個時間到當日截止之間，不等待、直接處理所有訊息'],
   ['接近截止提醒分鐘', 30, '截止前幾分鐘內下的單標成待確認'],
   ['待確認提醒時間', '15:30', '寄出待確認清單與「不是訂單」訊息清單'],
-  ['記錄回收', false, '勾選後「XX回收電力盒*N」會記到「回收紀錄」表；不勾選只標記為不是訂單'],
+  ['記錄回收', true, '「XX回收電力盒*N」寫入主檔「N月電力盒回收統計」（日期、客戶、數量）；備註「折貨款」且未打勾的，下次產單自動折抵'],
   ['自動寫入庫存管理', true, '產單後把出庫（含 10+1 特贈）接在主檔「庫存管理」最後面，建檔人員為「系統」；不會修改既有資料'],
   ['新客戶價格組合', 'A', '新客戶建檔草稿的預設價格組合'],
   ['新客戶要工具價格組合', 'B', '新客戶第一張訂單要工具時'],
@@ -169,6 +169,7 @@ function runBatch_(type, opts) {
       return { ok: true, message: msg };
     }
 
+    var recycleNote = truthy_(cfg['記錄回收']) && mainIds_()[0] ? applyRecycleCredits_(built.groups) : '';
     var batchId = Core.nextBatchId(today, readBatchIds_());
     var state = { month: String(cfg['單據編號月份'] || ''), last: Number(cfg['單據編號最後流水號']) || 0 };
     built.groups.forEach(function (g) {
@@ -209,7 +210,8 @@ function runBatch_(type, opts) {
       Session.getEffectiveUser().getEmail(), url(lblXlsx)
     ]);
 
-    var ledgerNote = '';
+    try { markRecycleUsed_(built.groups, today); } catch (e) { recycleNote += '<p>⚠ 回收統計備註註明失敗，請手動註明已折抵：' + esc_(e && e.message || e) + '</p>'; }
+    var ledgerNote = recycleNote;
     if (truthy_(cfg['自動寫入庫存管理']) && mainIds_()[0]) {
       try { ledgerNote = '<p>已寫入主檔「庫存管理」' + appendLedger_(built.groups, today, batchId, cfg) + ' 列（建檔人員：系統）。</p>'; }
       catch (e) { ledgerNote = '<p>⚠ 寫入庫存管理失敗，請手動登記：' + esc_(e && e.message || e) + '</p>'; }
@@ -750,6 +752,13 @@ function setupCore_() {
 
   var cfg = ensureSheet_(SHEET.CONFIG, ['項目', '值', '說明']);
   var obsolete = ['出貨單第一聯列', '出貨單第二聯列', '列印欄數', '出貨單PDF參數', '貨運單PDF參數', '出貨單列印設定', '貨運單列印設定', 'PDF字型', '出貨單字型', '貨運單字型'];
+  // 回收改為寫入主檔回收統計：舊版預設不勾選的「記錄回收」改為勾選一次
+  if (!PropertiesService.getScriptProperties().getProperty('recycle2')) {
+    for (var ry = 2; ry <= cfg.getLastRow(); ry++) {
+      if (cfg.getRange(ry, 1).getValue() === '記錄回收') cfg.getRange(ry, 2, 1, 2).setValues([[true, '「XX回收電力盒*N」寫入主檔「N月電力盒回收統計」（日期、客戶、數量）；備註「折貨款」且未打勾的，下次產單自動折抵']]);
+    }
+    PropertiesService.getScriptProperties().setProperty('recycle2', '1');
+  }
   // 改為只出 PDF：舊版預設勾選的「輸出Excel」取消一次
   if (!PropertiesService.getScriptProperties().getProperty('pdfOnly1')) {
     for (var rx = 2; rx <= cfg.getLastRow(); rx++) {
