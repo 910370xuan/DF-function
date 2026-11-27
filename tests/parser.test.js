@@ -254,3 +254,26 @@ test('新客戶資料擷取與預設價格組合', () => {
   assert.strictEqual(Parser.newCustomerCombo('GPB-2000*10 工具*1', [{ product: '小電池工具組', qty: 1 }]), 'B');
   assert.strictEqual(Parser.newCustomerCombo('GPB-2000*10 不用工具 要開發票', []), 'D(稅外加)');
 });
+
+test('業務代訂與回收（李宗光的訊息）', () => {
+  const v = [
+    { name: '105Studio', address: '300新竹市北區民富街137號' },
+    { name: '美雲智能車業', address: '702台南市南區中華南路二段302巷5弄2號' },
+    { name: '麒鎮車業行', address: '' }, { name: '卡斯克車業', address: '' }, { name: '豐賓車業', address: '' }
+  ];
+  const a = p('105 studio訂貨 GPB-3600*4');
+  assert.deepStrictEqual(a.items, [{ product: 'GPB-3600', qty: 4, pin8: 0 }]);
+  assert.strictEqual(a.kind, 'order');
+  assert.strictEqual(Parser.matchStore('105 studio訂貨 GPB-3600*4', v), '105Studio');
+  const b = p('美雲訂貨GPB-2000*5, DCB-6000*5');
+  assert.deepStrictEqual(b.items, [{ product: 'GPB-2000', qty: 5, pin8: 0 }, { product: 'DCB-6000', qty: 5, pin8: 0 }]);
+  assert.strictEqual(Parser.matchStore('美雲訂貨GPB-2000*5, DCB-6000*5', v), '美雲智能車業');
+  const c = p('麒鎮回收電力盒*11');
+  assert.strictEqual(c.kind, 'recycle');
+  assert.deepStrictEqual(c.items, [{ product: 'DCB-6000', qty: 11, pin8: 0 }]);
+  assert.strictEqual(Parser.matchStore('豐賓回收電力盒*56', v), '豐賓車業');
+  const d = p('105 studio訂貨GPB-3600方案二一組！');
+  assert.strictEqual(d.kind, 'unclear');
+  assert.ok(d.reasons.includes('指定促銷方案，請確認品項與價格'));
+  assert.strictEqual(p('Johnson請款').kind, 'not_order');
+});

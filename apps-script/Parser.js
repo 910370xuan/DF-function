@@ -187,6 +187,10 @@ var Parser = (function () {
     var modification = MOD_CANCEL.test(raw) && !merged.length ? 'cancel' : MOD_REPLACE.test(raw) ? 'replace' : MOD_ADD.test(raw) ? 'add' : '';
     if (noTool) notes.push('不需工具');
     if (opts.hasImage) reasons.push('含圖片，需人工看圖');
+    if (/方案/.test(raw)) reasons.push('指定促銷方案，請確認品項與價格');
+    // 回收：不是訂單，另外記錄（之後回收折抵用）；同時有訂貨字眼才當訂單並提醒
+    var recycle = /回收/.test(raw);
+    if (recycle && /訂|叫貨|出貨|要\s*\d/.test(raw)) { reasons.push('訊息同時提到回收，請確認'); recycle = false; }
     if (vagueQty) reasons.push('沒寫型號（' + vagueQty + ' 個），需查上一筆訂單');
 
     var kind;
@@ -197,6 +201,7 @@ var Parser = (function () {
     if (kind === 'unclear' && !merged.length && !vagueQty && !opts.hasImage && !mentioned) kind = 'not_order';
 
     if (modification === 'cancel' && kind === 'not_order') kind = 'unclear';
+    if (recycle && merged.length) kind = 'recycle';
     return { kind: kind, items: merged, notes: unique(notes), reasons: unique(reasons), vague: vagueQty ? { qty: vagueQty } : null,
       shipDate: shipDate, priceCombo: priceCombo, modification: modification };
   }
@@ -297,7 +302,7 @@ var Parser = (function () {
    * 完整店名出現最優先，其次是去掉「車業／有限公司」等字尾後的店名核心（至少 2 字）。
    * 有兩家以上同分時不建議（回傳 ''），交給客服選。
    */
-  var SUFFIX = /(股份有限公司|有限公司|企業社|工作室|車業行|機車行|車業|車行|電動車|電能車業|電能|動能|社區店|商行|科技|國際|實業|企業|貿易|行)$/;
+  var SUFFIX = /(股份有限公司|有限公司|企業社|工作室|車業行|機車行|車業|車行|電動車|電能車業|電能|動能|社區店|商行|科技|國際|實業|企業|貿易|智能|行)$/;
   function suggestVendor(texts, vendors) {
     var hay = normalize((texts || []).join(' ')).replace(/\s+/g, '');
     if (!hay) return '';

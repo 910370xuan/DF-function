@@ -1,6 +1,6 @@
 /* 華暉出貨自動化：請整份貼進 Apps Script 的 Code.gs（取代原本內容）。由 scripts/bundle.js 產生，請勿手改。 */
 
-var APP_VERSION = '2026-11-27 04:47';
+var APP_VERSION = '2026-11-27 05:02';
 
 /**
  * 純邏輯（不呼叫任何 Google 服務），Apps Script 與 Node 測試共用。
@@ -565,6 +565,10 @@ var Parser = (function () {
     var modification = MOD_CANCEL.test(raw) && !merged.length ? 'cancel' : MOD_REPLACE.test(raw) ? 'replace' : MOD_ADD.test(raw) ? 'add' : '';
     if (noTool) notes.push('不需工具');
     if (opts.hasImage) reasons.push('含圖片，需人工看圖');
+    if (/方案/.test(raw)) reasons.push('指定促銷方案，請確認品項與價格');
+    // 回收：不是訂單，另外記錄（之後回收折抵用）；同時有訂貨字眼才當訂單並提醒
+    var recycle = /回收/.test(raw);
+    if (recycle && /訂|叫貨|出貨|要\s*\d/.test(raw)) { reasons.push('訊息同時提到回收，請確認'); recycle = false; }
     if (vagueQty) reasons.push('沒寫型號（' + vagueQty + ' 個），需查上一筆訂單');
 
     var kind;
@@ -575,6 +579,7 @@ var Parser = (function () {
     if (kind === 'unclear' && !merged.length && !vagueQty && !opts.hasImage && !mentioned) kind = 'not_order';
 
     if (modification === 'cancel' && kind === 'not_order') kind = 'unclear';
+    if (recycle && merged.length) kind = 'recycle';
     return { kind: kind, items: merged, notes: unique(notes), reasons: unique(reasons), vague: vagueQty ? { qty: vagueQty } : null,
       shipDate: shipDate, priceCombo: priceCombo, modification: modification };
   }
@@ -675,7 +680,7 @@ var Parser = (function () {
    * 完整店名出現最優先，其次是去掉「車業／有限公司」等字尾後的店名核心（至少 2 字）。
    * 有兩家以上同分時不建議（回傳 ''），交給客服選。
    */
-  var SUFFIX = /(股份有限公司|有限公司|企業社|工作室|車業行|機車行|車業|車行|電動車|電能車業|電能|動能|社區店|商行|科技|國際|實業|企業|貿易|行)$/;
+  var SUFFIX = /(股份有限公司|有限公司|企業社|工作室|車業行|機車行|車業|車行|電動車|電能車業|電能|動能|社區店|商行|科技|國際|實業|企業|貿易|智能|行)$/;
   function suggestVendor(texts, vendors) {
     var hay = normalize((texts || []).join(' ')).replace(/\s+/g, '');
     if (!hay) return '';
@@ -926,7 +931,7 @@ var CONFIG_DEFAULTS = [
   ['新客戶價格組合', 'A', '新客戶建檔草稿的預設價格組合'],
   ['新客戶要工具價格組合', 'B', '新客戶第一張訂單要工具時'],
   ['新客戶要發票價格組合', 'D(稅外加)', '新客戶不用工具但要統編發票時'],
-  ['本公司人員', '', '公司同事在 LINE 群組裡的名稱（逗號分隔），這些人在群組講的話不會當成訂單，例如：李宗光,Jessica Tsai'],
+  ['本公司人員', '', '公司同事的 LINE 名稱（逗號分隔），例如：李宗光,Jessica Tsai。他們在群組講的話不當訂單；他們私訊官方帳號替店家下單時，自動用「業務代訂」逐則判斷店家'],
   ['AI判讀', false, '勾選後，規則判斷不了的訊息交給 Claude 判讀（需先設定金鑰）'],
   ['AI模型', 'claude-opus-5-5', '可改 claude-haiku-5-5（較便宜）'],
   ['AI思考強度', 'low', 'low / medium / high']
@@ -1774,7 +1779,8 @@ function showResult_(res) {
  * 系統不會傳任何訊息給客戶。
  */
 
-var LINE_SHEET = { LOG: '訊息紀錄', BIND: 'LINE帳號對照', TRIAL: 'LINE試跑' };
+var LINE_SHEET = { LOG: '訊息紀錄', BIND: 'LINE帳號對照', TRIAL: 'LINE試跑', RECYCLE: '回收紀錄' };
+var RECYCLE_HEADERS = ['收到時間', '店家', '型號', '數量', '原文', '來源', '狀態', '備註'];
 var LOG_HEADERS = ['收到時間', '事件ID', '對話ID（個人或群組）', '類型', '內容', '訊息ID', '狀態', '段落ID', '判斷', '發話者ID', '發話者名稱'];
 var BIND_HEADERS = ['LINE對話ID（個人或群組）', 'LINE名稱', '店家', '第一次出現', '備註', '系統建議店家'];
 var LOG_COL = {}; LOG_HEADERS.forEach(function (h, i) { LOG_COL[h] = i; });
@@ -1904,6 +1910,7 @@ function processLine_(force) {
   if (log.getLastRow() < 2) return '沒有 LINE 訊息';
   var data = log.getRange(2, 1, log.getLastRow() - 1, LOG_HEADERS.length).getValues();
   var seen = {}, msgs = [];
+  var agents = readAgentChats_();
   data.forEach(function (r, i) {
     if (r[LOG_COL['狀態']] !== '未處理') return;
     var eid = r[LOG_COL['事件ID']];
@@ -1913,7 +1920,8 @@ function processLine_(force) {
     var isGroup = /^[CR]/.test(String(chat)); // 群組 ID 以 C 開頭、多人聊天以 R 開頭
     msgs.push({
       row: i + 2, ts: new Date(r[LOG_COL['收到時間']]).getTime(),
-      userId: isGroup && sender ? chat + '|' + sender : chat, // 合併訊息的單位：個人；群組裡依發話者分開
+      // 合併訊息的單位：個人；群組裡依發話者分開；業務代訂帳號每則訊息各自處理（每則可能是不同店家）
+      userId: agents[chat] ? chat + '|m' + (i + 2) : isGroup && sender ? chat + '|' + sender : chat,
       chat: chat, type: r[LOG_COL['類型']], text: String(r[LOG_COL['內容']]), messageId: r[LOG_COL['訊息ID']]
     });
   });
@@ -1924,15 +1932,15 @@ function processLine_(force) {
   var segs = Core.readySegments(msgs, Date.now(), (Number(cfg['合併等待分鐘']) || 10) * 60000, forceNow);
   var ctx = {
     cfg: cfg, aliases: readAliases_(), products: unique_(readProducts_()), holidays: readHolidays_(),
-    bindings: readBindings_(), vendorInfo: readVendorInfo_(), history: null, today: fmtDate_(new Date())
+    bindings: readBindings_(), vendorInfo: readVendorInfo_(), agents: agents, history: null, today: fmtDate_(new Date())
   };
-  var counts = { order: 0, unclear: 0, not_order: 0 };
+  var counts = { order: 0, unclear: 0, not_order: 0, recycle: 0 };
   segs.forEach(function (seg) {
     var kind = handleSegment_(seg, ctx, log);
     counts[kind]++;
   });
   notifyUnbound_();
-  return '處理 ' + segs.length + ' 段對話：明確 ' + counts.order + '、待確認 ' + counts.unclear + '、非訂單 ' + counts.not_order +
+  return '處理 ' + segs.length + ' 段對話：明確 ' + counts.order + '、待確認 ' + counts.unclear + '、非訂單 ' + counts.not_order + '、回收 ' + counts.recycle +
     (msgs.length && !segs.length ? '（客戶可能還在輸入，' + (cfg['合併等待分鐘'] || 10) + ' 分鐘沒有新訊息後才會處理）' : '');
 }
 
@@ -1958,12 +1966,27 @@ function handleSegment_(seg, ctx, log) {
   // 廠商清冊改名（例如加上「(午後收貨)」）後仍對得上
   var bound = (ctx.bindings[chat] || []).map(function (b) { return Core.resolveVendor(b, vendorNames) || b; });
   var store = '', storeNote = '';
-  if (bound.length === 1) {
+  var agent = !!(ctx.agents && ctx.agents[chat]);
+  if (agent) {
+    // 業務代訂：每則訊息從店名或地址判斷是哪一家
+    store = Parser.matchStore(text, ctx.vendorInfo);
+    if (!store) storeNote = '業務代訂：訊息中找不到廠商清冊上的店名，請選擇店家';
+  } else if (bound.length === 1) {
     store = bound[0];
   } else if (bound.length > 1) {
     // 多店帳號／群組：從訊息裡的分店名或地址判斷
     store = Parser.matchStore(text, ctx.vendorInfo, bound);
     if (!store) storeNote = '這個帳號／群組綁了多家店（' + bound.join('、') + '），訊息沒寫是哪一家，請選擇店家';
+  }
+  if (res.kind === 'recycle') {
+    var st = store || Parser.matchStore(text, ctx.vendorInfo) || '';
+    var rsh = ensureSheet_(LINE_SHEET.RECYCLE, RECYCLE_HEADERS);
+    var rrows = res.items.map(function (it) {
+      return [new Date(first.ts), st, it.product, it.qty, text.slice(0, 200), 'LINE|' + seg.userId + '|' + segId, '待處理', st ? '' : '請選擇店家'];
+    });
+    rsh.getRange(rsh.getLastRow() + 1, 1, rrows.length, RECYCLE_HEADERS.length).setValues(rrows);
+    mark('回收');
+    return 'recycle';
   }
   var items = res.items.slice(), reasons = res.reasons.slice(), notes = res.notes.slice();
   var kind = res.kind;
@@ -1992,7 +2015,7 @@ function handleSegment_(seg, ctx, log) {
     }
   }
   if (storeNote) reasons.push(storeNote);
-  else if (!store) {
+  else if (!store && !agent) {
     var hint = Parser.matchStore(text, ctx.vendorInfo);
     reasons.push('LINE 帳號尚未綁定店家，請到「LINE帳號對照」選擇店家' + (hint ? '（系統建議：' + hint + '）' : '（廠商清冊找不到相符店名或地址，可能是新客戶，已建立「新客戶待建檔」草稿）'));
     if (!hint) draftNewCustomer_(chat, text, res, items);
@@ -2018,7 +2041,7 @@ function handleSegment_(seg, ctx, log) {
   var stamp = Utilities.formatDate(recvAt, TZ, 'MM/dd HH:mm');
 
   // 改單／追加／取消：比對同一個 LINE 帳號還沒出貨的訂單
-  var prev = findOpenOrders_(target, seg.userId, segId, recvDate);
+  var prev = findOpenOrders_(target, agent ? chat : seg.userId, segId, recvDate, store);
   var mod = res.modification;
   var implicit = false;
   if (!mod && prev.pending.length && items.length) {
@@ -2069,7 +2092,7 @@ function handleSegment_(seg, ctx, log) {
 }
 
 /** 同一 LINE 帳號、出貨日還沒到的訂單：未產單（可改）與已產單（需重印） */
-function findOpenOrders_(sh, userId, segId, today) {
+function findOpenOrders_(sh, userId, segId, today, store) {
   var out = { pending: [], printed: [] };
   if (sh.getLastRow() < 2) return out;
   var data = sh.getRange(2, 1, sh.getLastRow() - 1, ORDER_HEADERS.length).getValues();
@@ -2079,10 +2102,26 @@ function findOpenOrders_(sh, userId, segId, today) {
     var d = r[COL['出貨日']];
     var ds = isDate_(d) ? fmtDate_(d) : Core.normalizeDate(d);
     if (ds && ds < today) return;
+    // 只比對同一家店（代訂帳號、多店帳號底下會有不同店家的單）
+    if (store && r[COL['店家']] && Core.storeKey(r[COL['店家']]) !== Core.storeKey(store)) return;
     var item = { row: i + 2, product: r[COL['型號']], batch: r[COL['批次']], sys: String(r[COL['系統訊息']] || '') };
     var st = r[COL['狀態']];
     if (st === '建議' || st === '待確認' || st === '待出貨') out.pending.push(item);
     else if (st === '已產單') out.printed.push(item);
+  });
+  return out;
+}
+
+/** 業務代訂帳號：LINE 名稱在「本公司人員」裡，或備註寫「業務／代訂」 */
+function readAgentChats_() {
+  var sh = SpreadsheetApp.getActive().getSheetByName(LINE_SHEET.BIND);
+  var out = {};
+  if (!sh || sh.getLastRow() < 2) return out;
+  var staff = splitList_(readConfig_()['本公司人員']);
+  sh.getRange(2, 1, sh.getLastRow() - 1, 5).getValues().forEach(function (r) {
+    if (!r[0] || /^[CR]/.test(String(r[0]))) return; // 群組不算
+    var name = String(r[1]), note = String(r[4]);
+    if (/業務|代訂/.test(note) || staff.some(function (n) { return n && name.indexOf(n) >= 0; })) out[r[0]] = true;
   });
   return out;
 }
@@ -2131,9 +2170,10 @@ function notifyUnbound_() {
   var sh = ensureSheet_(LINE_SHEET.BIND, BIND_HEADERS);
   if (sh.getLastRow() < 2) return;
   var data = sh.getRange(2, 1, sh.getLastRow() - 1, 6).getValues();
+  var agentsNow = readAgentChats_();
   var fresh = [];
   data.forEach(function (r, i) {
-    if (r[0] && !String(r[2]).trim() && String(r[4]).indexOf('已通知') < 0) {
+    if (r[0] && !String(r[2]).trim() && String(r[4]).indexOf('已通知') < 0 && !/業務|代訂/.test(String(r[4])) && !agentsNow[r[0]]) {
       fresh.push(r);
       sh.getRange(i + 2, 5).setValue('已通知 ' + Utilities.formatDate(new Date(), TZ, 'MM/dd HH:mm'));
     }
@@ -2556,6 +2596,15 @@ function formatSheets_() {
       .requireValueInList(['4', '8'], true).setAllowInvalid(true).build());
   });
   step('新客戶待建檔', function () { formatNewCustomerSheet_(ensureSheet_(NEW_SHEET, NEW_HEADERS)); });
+  step('回收紀錄', function () {
+    var sh = ensureSheet_(LINE_SHEET.RECYCLE, RECYCLE_HEADERS);
+    formatSimple_(sh, { 1: 140, 2: 180, 3: 120, 4: 60, 5: 320, 6: 60, 7: 90, 8: 160 }, [6]);
+    sh.getRange(2, 1, sh.getMaxRows() - 1, 1).setNumberFormat('mm/dd hh:mm');
+    sh.getRange(2, 2, sh.getMaxRows() - 1, 1).setDataValidation(SpreadsheetApp.newDataValidation()
+      .requireValueInRange(ss.getSheetByName(SHEET.VENDORS).getRange('C2:C'), true).setAllowInvalid(true).build());
+    sh.getRange(2, 7, sh.getMaxRows() - 1, 1).setDataValidation(SpreadsheetApp.newDataValidation()
+      .requireValueInList(['待處理', '已驗收', '已折抵', '取消'], true).setAllowInvalid(true).build());
+  });
   step('訊息紀錄', function () { formatSimple_(ss.getSheetByName(LINE_SHEET.LOG), { 1: 150, 2: 60, 3: 60, 4: 70, 5: 440, 6: 60, 7: 90, 8: 60, 9: 110 }, [2, 3, 6, 8]); });
   step('批次紀錄', function () { formatSimple_(ss.getSheetByName(SHEET.BATCHES), { 1: 120, 2: 150, 3: 80, 4: 80, 5: 280, 6: 130, 7: 130, 8: 130, 9: 170, 10: 130 }, []); });
   step('設定', function () { formatConfig_(ss.getSheetByName(SHEET.CONFIG)); });
@@ -2680,7 +2729,7 @@ function buildOverview_() {
 function arrangeTabs_() {
   var ss = SpreadsheetApp.getActive();
   var order = ['總覽', SHEET.ORDERS, LINE_SHEET.TRIAL, LINE_SHEET.BIND, NEW_SHEET, SHEET.CONFIG, SHEET.ALIASES, SHEET.HOLIDAYS, SHEET.PARSE_TEST,
-    LINE_SHEET.LOG, SHEET.BATCHES, SHEET.INVOICE, SHEET.LABEL, SHEET.VENDORS];
+    LINE_SHEET.RECYCLE, LINE_SHEET.LOG, SHEET.BATCHES, SHEET.INVOICE, SHEET.LABEL, SHEET.VENDORS];
   var colors = {};
   colors[SHEET.ORDERS] = '#2f7d4f'; colors[LINE_SHEET.TRIAL] = '#7fa8ee'; colors[LINE_SHEET.BIND] = '#f6c453'; colors[NEW_SHEET] = '#a3620a';
   [LINE_SHEET.LOG, SHEET.BATCHES, SHEET.INVOICE, SHEET.LABEL, SHEET.VENDORS].forEach(function (n) { colors[n] = '#9aa3af'; });
