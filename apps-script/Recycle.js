@@ -37,9 +37,13 @@ function recordRecycle_(date, store, qty) {
   try {
     var target = 0;
     if (b.subtotalRow > b.firstRow) {
-      var vals = sh.getRange(b.firstRow, 1, b.subtotalRow - b.firstRow, Math.max(c.store, c.qty) + 1).getValues();
+      // 整列（公式與打勾框以外）都是空的才寫入，避免和別人先填的備註、匯款日期混在一起
+      var width = Math.max(sh.getLastColumn(), 10);
+      var rng = sh.getRange(b.firstRow, 1, b.subtotalRow - b.firstRow, width);
+      var vals = rng.getValues(), fx = rng.getFormulas();
       for (var i = 0; i < vals.length; i++) {
-        if (!String(vals[i][c.store]).trim() && !String(vals[i][c.qty]).trim() && (c.date < 0 || !String(vals[i][c.date]).trim())) { target = b.firstRow + i; break; }
+        var empty = vals[i].every(function (v, k) { return fx[i][k] || k === c.done || v === '' || v === false || v === null || v === 0; });
+        if (empty) { target = b.firstRow + i; break; }
       }
     }
     if (!target) {

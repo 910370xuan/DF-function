@@ -169,7 +169,12 @@ function runBatch_(type, opts) {
       return { ok: true, message: msg };
     }
 
-    var recycleNote = truthy_(cfg['記錄回收']) && mainIds_()[0] ? applyRecycleCredits_(built.groups) : '';
+    // 重印：整張單的每一列原本就有批次編號（已產單後被改回待出貨）→ 不再寫庫存、不再折抵回收
+    var byId = {};
+    orders.rows.forEach(function (r) { byId[r.id] = r; });
+    built.groups.forEach(function (g) { g.reprint = g.rowIds.every(function (id) { return byId[id] && byId[id].batch; }); });
+    var fresh = built.groups.filter(function (g) { return !g.reprint; });
+    var recycleNote = truthy_(cfg['記錄回收']) && mainIds_()[0] ? applyRecycleCredits_(fresh) : '';
     var batchId = Core.nextBatchId(today, readBatchIds_());
     var state = { month: String(cfg['單據編號月份'] || ''), last: Number(cfg['單據編號最後流水號']) || 0 };
     built.groups.forEach(function (g) {
@@ -210,10 +215,14 @@ function runBatch_(type, opts) {
       Session.getEffectiveUser().getEmail(), url(lblXlsx)
     ]);
 
-    try { markRecycleUsed_(built.groups, today); } catch (e) { recycleNote += '<p>⚠ 回收統計備註註明失敗，請手動註明已折抵：' + esc_(e && e.message || e) + '</p>'; }
+    try { markRecycleUsed_(fresh, today); } catch (e) { recycleNote += '<p>⚠ 回收統計備註註明失敗，請手動註明已折抵：' + esc_(e && e.message || e) + '</p>'; }
     var ledgerNote = recycleNote;
     if (truthy_(cfg['自動寫入庫存管理']) && mainIds_()[0]) {
-      try { ledgerNote = '<p>已寫入主檔「庫存管理」' + appendLedger_(built.groups, today, batchId, cfg) + ' 列（建檔人員：系統）。</p>'; }
+      try {
+        ledgerNote += fresh.length ? '<p>已寫入主檔「庫存管理」' + appendLedger_(fresh, today, batchId, cfg) + ' 列（建檔人員：系統）。</p>' : '';
+        var re = built.groups.filter(function (g) { return g.reprint; }).map(function (g) { return g.store; });
+        if (re.length) ledgerNote += '<p>重印：' + re.map(esc_).join('、') + '（之前已產單），沒有再寫入庫存管理、沒有再折抵回收。</p>';
+      }
       catch (e) { ledgerNote = '<p>⚠ 寫入庫存管理失敗，請手動登記：' + esc_(e && e.message || e) + '</p>'; }
     }
     notify_('【出貨】' + today + ' ' + type + ' ' + batchId + '：' + built.groups.length + ' 家店',
@@ -540,7 +549,8 @@ function readOrders_() {
       priceCombo: String(r[COL['價格組合']] || '').trim(),
       discount: r[COL['折讓金額']],
       paid: r[COL['已收金額']],
-      status: String(r[COL['狀態']] || '').trim()
+      status: String(r[COL['狀態']] || '').trim(),
+      batch: String(r[COL['批次']] || '').trim()
     };
   });
   if (changedIds) {
@@ -622,11 +632,15 @@ function syncVendors() {
   var src = SpreadsheetApp.openById(id).getSheetByName(SHEET.VENDORS);
   if (!src) throw new Error('主檔找不到「廠商清冊」工作表');
   var values = src.getRange(1, 1, src.getLastRow(), src.getLastColumn()).getValues();
+  if (values.length < 2) throw new Error('主檔廠商清冊是空的，已停止同步（避免清掉這裡的資料）');
   var dst = mustSheet_(SHEET.VENDORS);
-  dst.clearContents();
   if (dst.getMaxColumns() < values[0].length) dst.insertColumnsAfter(dst.getMaxColumns(), values[0].length - dst.getMaxColumns());
   if (dst.getMaxRows() < values.length) dst.insertRowsAfter(dst.getMaxRows(), values.length - dst.getMaxRows());
+  // 先寫入新資料，再清掉多出來的舊列與舊欄（過程中不會有空白的時候）
   dst.getRange(1, 1, values.length, values[0].length).setValues(values);
+  var oldRows = dst.getLastRow(), oldCols = dst.getLastColumn();
+  if (oldRows > values.length) dst.getRange(values.length + 1, 1, oldRows - values.length, Math.max(oldCols, 1)).clearContent();
+  if (oldCols > values[0].length) dst.getRange(1, values[0].length + 1, values.length, oldCols - values[0].length).clearContent();
 }
 
 /* ───────────── 訊息解析（第二階段的規則層，先提供測試用） ───────────── */

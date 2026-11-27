@@ -599,16 +599,22 @@ function archiveLog_(days) {
   if (!log || log.getLastRow() < 2) return 0;
   var cutoff = Date.now() - days * 86400000;
   var data = log.getRange(2, 1, log.getLastRow() - 1, LOG_HEADERS.length).getValues();
-  var keep = [], old = [];
-  data.forEach(function (r) {
+  var old = [], oldRows = [];
+  data.forEach(function (r, i) {
     var t = new Date(r[LOG_COL['收到時間']]).getTime();
-    (r[LOG_COL['狀態']] !== '未處理' && t < cutoff ? old : keep).push(r);
+    if (r[LOG_COL['狀態']] !== '未處理' && t < cutoff) { old.push(r); oldRows.push(i + 2); }
   });
   if (!old.length) return 0;
+  // 先複製到封存表，再只刪除已封存的列（未處理的訊息完全不動）
   var arc = ensureSheet_(LINE_SHEET.LOG + '封存', LOG_HEADERS);
   arc.getRange(arc.getLastRow() + 1, 1, old.length, LOG_HEADERS.length).setValues(old);
-  log.getRange(2, 1, data.length, LOG_HEADERS.length).clearContent();
-  if (keep.length) log.getRange(2, 1, keep.length, LOG_HEADERS.length).setValues(keep);
+  // 由下往上、把連續的列一次刪除
+  for (var k = oldRows.length - 1; k >= 0;) {
+    var end = oldRows[k], start = end;
+    while (k - 1 >= 0 && oldRows[k - 1] === start - 1) { k--; start--; }
+    log.deleteRows(start, end - start + 1);
+    k--;
+  }
   return old.length;
 }
 
