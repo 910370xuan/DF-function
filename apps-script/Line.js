@@ -477,7 +477,10 @@ var AI_SYSTEM_PROMPT = [
   '- 「10+1」代表訂 10 個，贈品由系統另外計算，數量填 10，不要自己加 1。',
   '- DCB-6000 沒寫 pin 數就是 4pin，pin8 填 0；明確寫 8pin 的數量才填進 pin8。',
   '- 「不需工具／不用工具」是備註，不是訂購工具；「工具」指小電池工具組。',
-  '- 只說「小電池」「小電」「幫我出10+1」等沒有型號的訊息：items 留空，concerns 寫明「沒有型號」。',
+  '- 型號可能打錯字（GBP-2000＝GPB-2000、GPB-6000＝DCB-6000）、數量可能是中文（十顆、兩顆）或和型號分在不同行，請合在一起判斷。',
+  '- 「小電池」「小電」「備用電池」「電池」「一次20個」「幫我出10+1」等沒有型號的訊息：',
+  '  若有提供這家店最近的訂單，以最近一筆電池類型號（GPB-2000／A／S、DCB-6000、GPB-3600）當作品項，數量照這次訊息，並在 concerns 寫「依歷史訂單推測型號」；',
+  '  沒有歷史訂單可參考時，items 留空，concerns 寫明「沒有型號」。',
   '- 圖片若是促銷文宣，請依文宣上的型號與方案判斷，並在 concerns 說明依據。',
   '- 詢問、道謝、匯款通知、催貨、客訴不是訂單：is_order 為 false、items 留空。',
   '- 指定日期、送貨時間、統編發票、記帳、改單等特殊要求，寫進 concerns。',
@@ -510,7 +513,7 @@ function aiSchema_(products) {
 }
 
 /** 回傳 { is_order, items, concerns, notes } 或 { error } */
-function askClaude_(text, images, ctx, store) {
+function askClaude_(text, images, ctx, store, imageBlobs) {
   var key = PropertiesService.getScriptProperties().getProperty('ANTHROPIC_API_KEY');
   if (!key) return { error: '尚未設定 Claude API 金鑰' };
   var budget = Number(ctx.cfg['AI每月上限美元']);
@@ -520,6 +523,9 @@ function askClaude_(text, images, ctx, store) {
     ctx.aliases.map(function (a) { return a.alias + '→' + a.product + (a.pin ? '（' + a.pin + 'pin）' : ''); }).join('、');
 
   var content = [];
+  (imageBlobs || []).slice(0, 3).forEach(function (blob) {
+    content.push({ type: 'image', source: { type: 'base64', media_type: blob.getContentType(), data: Utilities.base64Encode(blob.getBytes()) } });
+  });
   images.slice(0, 3).forEach(function (img) {
     var blob = lineContent_(img.messageId);
     if (blob) content.push({ type: 'image', source: { type: 'base64', media_type: blob.getContentType(), data: Utilities.base64Encode(blob.getBytes()) } });

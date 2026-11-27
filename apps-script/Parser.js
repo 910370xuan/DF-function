@@ -8,6 +8,7 @@ var Parser = (function () {
     ['GPB-2000A', 'GPB-2000A'], ['A款', 'GPB-2000A'], ['2000A', 'GPB-2000A'],
     ['GPB-2000S', 'GPB-2000S'], ['S款', 'GPB-2000S'], ['2000S', 'GPB-2000S'],
     ['GPB-2000', 'GPB-2000'], ['GPB2000', 'GPB-2000'], ['一般的', 'GPB-2000'], ['2000', 'GPB-2000'],
+    ['GBP-2000A', 'GPB-2000A'], ['GBP-2000S', 'GPB-2000S'], ['GBP-2000', 'GPB-2000'], ['GBP2000', 'GPB-2000'],
     ['DCB-6000', 'DCB-6000'], ['DCB6000', 'DCB-6000'], ['GPB-6000', 'DCB-6000'], ['6000', 'DCB-6000'],
     ['直流電力盒', 'DCB-6000'], ['電力盒', 'DCB-6000'],
     ['直流', 'DCB-6000'], ['DC BOX', 'DCB-6000'], ['DCBOX', 'DCB-6000'],
@@ -227,10 +228,23 @@ var Parser = (function () {
    * 從歷史訂單找這家店最近一次的品項（給「小電池」「幫我出10+1」當建議）。
    * prefer：優先考慮的型號（例如 10+1 適用的電池），有的話只在這些型號裡找。
    */
+  /** 店名核心：去括號、空白與「車業／有限公司」等字尾，例：「鑫沅車業」「鑫沅」都是「鑫沅」 */
+  function coreName(name) {
+    var k = normalize(storeKey(name));
+    for (var i = 0; i < 4; i++) k = k.replace(SUFFIX, '');
+    return k;
+  }
+
+  /** 歷史紀錄的店名可能和廠商清冊寫法不同：完整相同或核心相同（至少 2 字）都算同一家 */
+  function sameStore(a, b) {
+    if (storeKey(a) === storeKey(b)) return true;
+    var ca = coreName(a), cb = coreName(b);
+    return ca.length >= 2 && ca === cb;
+  }
+
   function suggestFromHistory(store, history, exclude, prefer) {
     exclude = exclude || /工具|起子|批頭|線組/;
-    var key = storeKey(store);
-    var rows = (history || []).filter(function (h) { return storeKey(h.store) === key && h.product && !exclude.test(h.product); });
+    var rows = (history || []).filter(function (h) { return sameStore(h.store, store) && h.product && !exclude.test(h.product); });
     if (prefer && prefer.length) {
       var preferred = rows.filter(function (h) { return prefer.indexOf(h.product) >= 0; });
       if (preferred.length) rows = preferred;
@@ -288,8 +302,7 @@ var Parser = (function () {
    */
   function topProduct(store, table, prefer) {
     if (!table || !table.rows) return '';
-    var key = storeKey(store);
-    var row = table.rows.filter(function (r) { return storeKey(r[0]) === key; })[0];
+    var row = table.rows.filter(function (r) { return sameStore(r[0], store); })[0];
     if (!row) return '';
     var best = '', max = 0;
     table.headers.forEach(function (h, i) {
@@ -302,8 +315,7 @@ var Parser = (function () {
 
   /** 這家店最近 n 筆訂單（給 AI 當參考，不送整份歷史） */
   function recentFor(store, history, n) {
-    var key = storeKey(store);
-    var rows = (history || []).filter(function (h) { return storeKey(h.store) === key && h.product; });
+    var rows = (history || []).filter(function (h) { return sameStore(h.store, store) && h.product; });
     rows.sort(function (a, b) { return String(b.date).localeCompare(String(a.date)); });
     return rows.slice(0, n || 3).map(function (h) { return { product: h.product, qty: Number(h.qty), date: h.date }; });
   }
@@ -313,7 +325,7 @@ var Parser = (function () {
    * 完整店名出現最優先，其次是去掉「車業／有限公司」等字尾後的店名核心（至少 2 字）。
    * 有兩家以上同分時不建議（回傳 ''），交給客服選。
    */
-  var SUFFIX = /(股份有限公司|有限公司|企業社|工作室|車業行|機車行|車業|車行|電動車|電能車業|電能|動能|社區店|商行|科技|國際|實業|企業|貿易|智能|行)$/;
+  var SUFFIX = /(股份有限公司|有限公司|企業社|工作室|車業行|機車行|車業|車行|電動車|電能車業|電能|動能|社區店|商行|科技|國際|實業|企業|貿易|智能|電動機車|電動|行)$/;
   function suggestVendor(texts, vendors) {
     var hay = normalize((texts || []).join(' ')).replace(/\s+/g, '');
     if (!hay) return '';
@@ -405,9 +417,9 @@ var Parser = (function () {
   function unique(arr) { return arr.filter(function (x, i) { return arr.indexOf(x) === i; }); }
 
   /** 新版才加入的對照，舊的「型號對照」工作表會自動補上 */
-  var ADDED_ALIASES = ['小電池工具組', '工具組', '工具', '2000A', '2000S', 'GPB-6000', '6000'];
+  var ADDED_ALIASES = ['小電池工具組', '工具組', '工具', '2000A', '2000S', 'GPB-6000', '6000', 'GBP-2000A', 'GBP-2000S', 'GBP-2000', 'GBP2000'];
 
-  return { DEFAULT_ALIASES: DEFAULT_ALIASES, ADDED_ALIASES: ADDED_ALIASES, recentFor: recentFor, storeKey: storeKey, topProduct: topProduct, suggestVendor: suggestVendor, extractDate: extractDate, matchStore: matchStore, addrKey: addrKey, extractContact: extractContact, newCustomerCombo: newCustomerCombo, normalize: normalize, parse: parse, suggestFromHistory: suggestFromHistory };
+  return { DEFAULT_ALIASES: DEFAULT_ALIASES, ADDED_ALIASES: ADDED_ALIASES, recentFor: recentFor, storeKey: storeKey, sameStore: sameStore, topProduct: topProduct, suggestVendor: suggestVendor, extractDate: extractDate, matchStore: matchStore, addrKey: addrKey, extractContact: extractContact, newCustomerCombo: newCustomerCombo, normalize: normalize, parse: parse, suggestFromHistory: suggestFromHistory };
 })();
 
 if (typeof module !== 'undefined') module.exports = Parser;

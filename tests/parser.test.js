@@ -291,3 +291,12 @@ test('型號與數量被標點分開、10搭1 寫法', () => {
   const c = p('GPB-2000、DCB-6000，各要\n5個');
   assert.ok(c.reasons.some(x => x.includes('沒有數量')));
 });
+
+test('GBP 錯字、數量在上一行；歷史店名寫法不同也對得上', () => {
+  assert.deepStrictEqual(p('10顆\nGBP-2000').items, [{ product: 'GPB-2000', qty: 10, pin8: 0 }]);
+  const h = [{ store: '鑫沅', product: 'GPB-2000', qty: 20, date: '2026-11-01' }];
+  assert.strictEqual(Parser.suggestFromHistory('鑫沅車業', h).product, 'GPB-2000');
+  assert.strictEqual(Parser.recentFor('鑫沅電動車行', h, 3).length, 1);
+  assert.strictEqual(Parser.sameStore('格錸車業', '格錸'), true);
+  assert.strictEqual(Parser.sameStore('格錸車業', '格'), false);
+});

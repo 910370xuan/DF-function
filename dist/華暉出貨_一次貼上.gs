@@ -1,6 +1,6 @@
 /* 華暉出貨自動化：請整份貼進 Apps Script 的 Code.gs（取代原本內容）。由 scripts/bundle.js 產生，請勿手改。 */
 
-var APP_VERSION = '2026-11-27 08:15';
+var APP_VERSION = '2026-11-27 08:28';
 
 /**
  * 純邏輯（不呼叫任何 Google 服務），Apps Script 與 Node 測試共用。
@@ -437,6 +437,7 @@ var Parser = (function () {
     ['GPB-2000A', 'GPB-2000A'], ['A款', 'GPB-2000A'], ['2000A', 'GPB-2000A'],
     ['GPB-2000S', 'GPB-2000S'], ['S款', 'GPB-2000S'], ['2000S', 'GPB-2000S'],
     ['GPB-2000', 'GPB-2000'], ['GPB2000', 'GPB-2000'], ['一般的', 'GPB-2000'], ['2000', 'GPB-2000'],
+    ['GBP-2000A', 'GPB-2000A'], ['GBP-2000S', 'GPB-2000S'], ['GBP-2000', 'GPB-2000'], ['GBP2000', 'GPB-2000'],
     ['DCB-6000', 'DCB-6000'], ['DCB6000', 'DCB-6000'], ['GPB-6000', 'DCB-6000'], ['6000', 'DCB-6000'],
     ['直流電力盒', 'DCB-6000'], ['電力盒', 'DCB-6000'],
     ['直流', 'DCB-6000'], ['DC BOX', 'DCB-6000'], ['DCBOX', 'DCB-6000'],
@@ -656,10 +657,23 @@ var Parser = (function () {
    * 從歷史訂單找這家店最近一次的品項（給「小電池」「幫我出10+1」當建議）。
    * prefer：優先考慮的型號（例如 10+1 適用的電池），有的話只在這些型號裡找。
    */
+  /** 店名核心：去括號、空白與「車業／有限公司」等字尾，例：「鑫沅車業」「鑫沅」都是「鑫沅」 */
+  function coreName(name) {
+    var k = normalize(storeKey(name));
+    for (var i = 0; i < 4; i++) k = k.replace(SUFFIX, '');
+    return k;
+  }
+
+  /** 歷史紀錄的店名可能和廠商清冊寫法不同：完整相同或核心相同（至少 2 字）都算同一家 */
+  function sameStore(a, b) {
+    if (storeKey(a) === storeKey(b)) return true;
+    var ca = coreName(a), cb = coreName(b);
+    return ca.length >= 2 && ca === cb;
+  }
+
   function suggestFromHistory(store, history, exclude, prefer) {
     exclude = exclude || /工具|起子|批頭|線組/;
-    var key = storeKey(store);
-    var rows = (history || []).filter(function (h) { return storeKey(h.store) === key && h.product && !exclude.test(h.product); });
+    var rows = (history || []).filter(function (h) { return sameStore(h.store, store) && h.product && !exclude.test(h.product); });
     if (prefer && prefer.length) {
       var preferred = rows.filter(function (h) { return prefer.indexOf(h.product) >= 0; });
       if (preferred.length) rows = preferred;
@@ -717,8 +731,7 @@ var Parser = (function () {
    */
   function topProduct(store, table, prefer) {
     if (!table || !table.rows) return '';
-    var key = storeKey(store);
-    var row = table.rows.filter(function (r) { return storeKey(r[0]) === key; })[0];
+    var row = table.rows.filter(function (r) { return sameStore(r[0], store); })[0];
     if (!row) return '';
     var best = '', max = 0;
     table.headers.forEach(function (h, i) {
@@ -731,8 +744,7 @@ var Parser = (function () {
 
   /** 這家店最近 n 筆訂單（給 AI 當參考，不送整份歷史） */
   function recentFor(store, history, n) {
-    var key = storeKey(store);
-    var rows = (history || []).filter(function (h) { return storeKey(h.store) === key && h.product; });
+    var rows = (history || []).filter(function (h) { return sameStore(h.store, store) && h.product; });
     rows.sort(function (a, b) { return String(b.date).localeCompare(String(a.date)); });
     return rows.slice(0, n || 3).map(function (h) { return { product: h.product, qty: Number(h.qty), date: h.date }; });
   }
@@ -742,7 +754,7 @@ var Parser = (function () {
    * 完整店名出現最優先，其次是去掉「車業／有限公司」等字尾後的店名核心（至少 2 字）。
    * 有兩家以上同分時不建議（回傳 ''），交給客服選。
    */
-  var SUFFIX = /(股份有限公司|有限公司|企業社|工作室|車業行|機車行|車業|車行|電動車|電能車業|電能|動能|社區店|商行|科技|國際|實業|企業|貿易|智能|行)$/;
+  var SUFFIX = /(股份有限公司|有限公司|企業社|工作室|車業行|機車行|車業|車行|電動車|電能車業|電能|動能|社區店|商行|科技|國際|實業|企業|貿易|智能|電動機車|電動|行)$/;
   function suggestVendor(texts, vendors) {
     var hay = normalize((texts || []).join(' ')).replace(/\s+/g, '');
     if (!hay) return '';
@@ -834,9 +846,9 @@ var Parser = (function () {
   function unique(arr) { return arr.filter(function (x, i) { return arr.indexOf(x) === i; }); }
 
   /** 新版才加入的對照，舊的「型號對照」工作表會自動補上 */
-  var ADDED_ALIASES = ['小電池工具組', '工具組', '工具', '2000A', '2000S', 'GPB-6000', '6000'];
+  var ADDED_ALIASES = ['小電池工具組', '工具組', '工具', '2000A', '2000S', 'GPB-6000', '6000', 'GBP-2000A', 'GBP-2000S', 'GBP-2000', 'GBP2000'];
 
-  return { DEFAULT_ALIASES: DEFAULT_ALIASES, ADDED_ALIASES: ADDED_ALIASES, recentFor: recentFor, storeKey: storeKey, topProduct: topProduct, suggestVendor: suggestVendor, extractDate: extractDate, matchStore: matchStore, addrKey: addrKey, extractContact: extractContact, newCustomerCombo: newCustomerCombo, normalize: normalize, parse: parse, suggestFromHistory: suggestFromHistory };
+  return { DEFAULT_ALIASES: DEFAULT_ALIASES, ADDED_ALIASES: ADDED_ALIASES, recentFor: recentFor, storeKey: storeKey, sameStore: sameStore, topProduct: topProduct, suggestVendor: suggestVendor, extractDate: extractDate, matchStore: matchStore, addrKey: addrKey, extractContact: extractContact, newCustomerCombo: newCustomerCombo, normalize: normalize, parse: parse, suggestFromHistory: suggestFromHistory };
 })();
 
 if (typeof module !== 'undefined') module.exports = Parser;
@@ -947,7 +959,8 @@ var SHEET = {
 };
 var ALIAS_HEADERS = ['客戶說法', '型號', 'pin（4 或 8，可空白）'];
 var PARSE_HEADERS = ['訊息（貼上客戶訊息）', '店家（可空白）', '有圖片', '判斷', '品項', '備註', '需確認原因', '上一筆訂單建議',
-  '正確答案（選填，例：GPB-2000A*10, DCB-6000*10, 8pin*2；4pin 與 8pin 分開寫）', '模型A', 'A判讀', 'A費用', '模型B', 'B判讀', 'B費用', '比對'];
+  '正確答案（選填，例：GPB-2000A*10, DCB-6000*10, 8pin*2；4pin 與 8pin 分開寫）', '模型A', 'A判讀', 'A費用', '模型B', 'B判讀', 'B費用', '比對',
+  '圖片（雲端硬碟連結，選填）'];
 
 var ORDER_HEADERS = ['訂單ID', '收單時間', '出貨日', '店家', '型號', '數量', '8pin數', '附註', '狀態', '批次', '單據編號', '來源', '系統訊息', '折讓金額', '已收金額', '確認', '價格組合'];
 var COL = {}; ORDER_HEADERS.forEach(function (h, i) { COL[h] = i; });
@@ -997,9 +1010,9 @@ var CONFIG_DEFAULTS = [
   ['新客戶要發票價格組合', 'D(稅外加)', '新客戶不用工具但要統編發票時'],
   ['本公司人員', '', '公司同事的 LINE 名稱（逗號分隔），例如：李宗光,Jessica Tsai。他們在群組講的話不當訂單；他們私訊官方帳號替店家下單時，自動用「業務代訂」逐則判斷店家'],
   ['AI判讀', false, '勾選後，規則判斷不了的訊息交給 Claude 判讀（需先設定金鑰）'],
-  ['AI模型', 'claude-opus-5-5', '可改 claude-haiku-5-5（較便宜）'],
+  ['AI模型', 'claude-haiku-5-5', 'claude-haiku-5-5（便宜、快）或 claude-opus-5-5（較準、約貴 40 倍）'],
   ['AI思考強度', 'low', 'low / medium / high'],
-  ['AI比較模型', 'claude-haiku-5-5', '「AI 模型比較」時和「AI模型」一起比較的第二個模型'],
+  ['AI比較模型', '', '「AI 模型比較」時要一起比較的第二個模型；空白＝只測「AI模型」'],
   ['AI每月上限美元', 5, '本月 AI 估計費用超過這個金額就停止呼叫，改由客服判斷；0＝不限制（費用明細見「AI使用紀錄」）']
 ];
 
@@ -1014,7 +1027,7 @@ function onOpen() {
     .addItem('立即處理 LINE 訊息', 'menuProcessLine')
     .addItem('設定金鑰（LINE／Claude）', 'menuSetKeys')
     .addItem('AI 連線測試', 'menuTestAi')
-    .addItem('AI 模型比較（解析測試的訊息）', 'menuCompareModels')
+    .addItem('AI 判讀測試（解析測試的訊息）', 'menuCompareModels')
     .addItem('同步廠商清冊', 'syncVendors')
     .addItem('清理產單暫存試算表', 'cleanupTempSheets')
     .addItem('整理表格外觀', 'menuFormatSheets')
@@ -1666,7 +1679,7 @@ function menuCompareModels() {
   sh.getRange(1, 1, 1, PARSE_HEADERS.length).setValues([PARSE_HEADERS]).setFontWeight('bold');
   var n = sh.getLastRow() - 1;
   if (n < 1) { showResult_({ message: '請先在「解析測試」A 欄貼上客戶訊息（一格一段），I 欄可填正確答案' }); return; }
-  var models = [String(cfg['AI模型'] || 'claude-opus-5-5').trim(), String(cfg['AI比較模型'] || 'claude-haiku-5-5').trim()];
+  var models = [String(cfg['AI模型'] || 'claude-haiku-5-5').trim(), String(cfg['AI比較模型'] || '').trim()].filter(String);
   var base = { aliases: readAliases_(), products: unique_(readProducts_()), history: null };
   var data = sh.getRange(2, 1, n, PARSE_HEADERS.length).getValues();
   var done = 0, score = [0, 0], graded = 0, cost = [0, 0], started = Date.now();
@@ -1677,16 +1690,24 @@ function menuCompareModels() {
     var expected = String(data[i][8]).trim();
     var expKey = expected ? itemsKey_(Parser.parse(expected, { aliases: base.aliases }).items) : '';
     var out = [];
+    var blobs = [];
+    var link = String(data[i][16] || '').trim();
+    if (link) {
+      var fid = (link.match(/[-\w]{25,}/) || [])[0];
+      try { if (fid) blobs.push(DriveApp.getFileById(fid).getBlob()); } catch (e) { out.push('', '❌ 圖片讀取失敗：請確認連結是雲端硬碟檔案且你有權限', ''); }
+    }
     models.forEach(function (m, k) {
       var c = Object.assign({}, base, { cfg: Object.assign({}, cfg, { 'AI模型': m }) });
-      var r = askClaude_(text, [], c, store);
+      var r = askClaude_(text, [], c, store, blobs);
       if (r.error) { out.push(m, '❌ ' + r.error, ''); return; }
       var key = itemsKey_(r.items);
       cost[k] += r.cost;
       out.push(r.model, (key || '（無品項）') + (r.concerns.length ? '\n疑點：' + r.concerns.join('；') : ''), Math.round(r.cost * 10000) / 10000);
       if (expKey) { if (key === expKey) score[k]++; out[out.length - 2] = (key === expKey ? '✅ ' : '❌ ') + out[out.length - 2]; }
     });
-    var verdict = expKey ? (out[1].indexOf('✅') === 0 ? 'A對' : 'A錯') + '／' + (out[4].indexOf('✅') === 0 ? 'B對' : 'B錯') : '（未填正確答案）';
+    while (out.length < 6) out.push('');
+    out = out.slice(0, 6);
+    var verdict = !expKey ? '（未填正確答案）' : (out[1].indexOf('✅') === 0 ? 'A對' : 'A錯') + (models[1] ? '／' + (out[4].indexOf('✅') === 0 ? 'B對' : 'B錯') : '');
     if (expKey) graded++;
     sh.getRange(i + 2, 10, 1, 7).setValues([out.concat([verdict])]);
     done++;
@@ -1694,8 +1715,8 @@ function menuCompareModels() {
   sh.getRange(2, 11, n, 1).setWrap(true);
   sh.getRange(2, 14, n, 1).setWrap(true);
   var msg = '本次比較 ' + done + ' 則訊息\n\n' +
-    'A：' + models[0] + (graded ? '　答對 ' + score[0] + '/' + graded : '') + '　費用 US$' + cost[0].toFixed(4) + '\n' +
-    'B：' + models[1] + (graded ? '　答對 ' + score[1] + '/' + graded : '') + '　費用 US$' + cost[1].toFixed(4) +
+    'A：' + models[0] + (graded ? '　答對 ' + score[0] + '/' + graded : '') + '　費用 US$' + cost[0].toFixed(4) +
+    (models[1] ? '\nB：' + models[1] + (graded ? '　答對 ' + score[1] + '/' + graded : '') + '　費用 US$' + cost[1].toFixed(4) : '') +
     (done === 15 ? '\n\n還有沒比較的訊息，請再執行一次。' : '') +
     '\n\n在 I 欄填正確答案就能自動評分；要重跑某一列，清空那一列的 J～P 欄。';
   showResult_({ message: msg });
@@ -1762,6 +1783,15 @@ function setupCore_() {
 
   var cfg = ensureSheet_(SHEET.CONFIG, ['項目', '值', '說明']);
   var obsolete = ['出貨單第一聯列', '出貨單第二聯列', '列印欄數', '出貨單PDF參數', '貨運單PDF參數', '出貨單列印設定', '貨運單列印設定', 'PDF字型', '出貨單字型', '貨運單字型'];
+  // 依使用者決定改用 Haiku、只測一個模型（只改一次）
+  if (!PropertiesService.getScriptProperties().getProperty('haiku1')) {
+    for (var rh = 2; rh <= cfg.getLastRow(); rh++) {
+      var kh = cfg.getRange(rh, 1).getValue();
+      if (kh === 'AI模型') cfg.getRange(rh, 2).setValue('claude-haiku-5-5');
+      if (kh === 'AI比較模型') cfg.getRange(rh, 2).setValue('');
+    }
+    PropertiesService.getScriptProperties().setProperty('haiku1', '1');
+  }
   // 回收改為寫入主檔回收統計：舊版預設不勾選的「記錄回收」改為勾選一次
   if (!PropertiesService.getScriptProperties().getProperty('recycle2')) {
     for (var ry = 2; ry <= cfg.getLastRow(); ry++) {
@@ -2404,7 +2434,10 @@ var AI_SYSTEM_PROMPT = [
   '- 「10+1」代表訂 10 個，贈品由系統另外計算，數量填 10，不要自己加 1。',
   '- DCB-6000 沒寫 pin 數就是 4pin，pin8 填 0；明確寫 8pin 的數量才填進 pin8。',
   '- 「不需工具／不用工具」是備註，不是訂購工具；「工具」指小電池工具組。',
-  '- 只說「小電池」「小電」「幫我出10+1」等沒有型號的訊息：items 留空，concerns 寫明「沒有型號」。',
+  '- 型號可能打錯字（GBP-2000＝GPB-2000、GPB-6000＝DCB-6000）、數量可能是中文（十顆、兩顆）或和型號分在不同行，請合在一起判斷。',
+  '- 「小電池」「小電」「備用電池」「電池」「一次20個」「幫我出10+1」等沒有型號的訊息：',
+  '  若有提供這家店最近的訂單，以最近一筆電池類型號（GPB-2000／A／S、DCB-6000、GPB-3600）當作品項，數量照這次訊息，並在 concerns 寫「依歷史訂單推測型號」；',
+  '  沒有歷史訂單可參考時，items 留空，concerns 寫明「沒有型號」。',
   '- 圖片若是促銷文宣，請依文宣上的型號與方案判斷，並在 concerns 說明依據。',
   '- 詢問、道謝、匯款通知、催貨、客訴不是訂單：is_order 為 false、items 留空。',
   '- 指定日期、送貨時間、統編發票、記帳、改單等特殊要求，寫進 concerns。',
@@ -2437,7 +2470,7 @@ function aiSchema_(products) {
 }
 
 /** 回傳 { is_order, items, concerns, notes } 或 { error } */
-function askClaude_(text, images, ctx, store) {
+function askClaude_(text, images, ctx, store, imageBlobs) {
   var key = PropertiesService.getScriptProperties().getProperty('ANTHROPIC_API_KEY');
   if (!key) return { error: '尚未設定 Claude API 金鑰' };
   var budget = Number(ctx.cfg['AI每月上限美元']);
@@ -2447,6 +2480,9 @@ function askClaude_(text, images, ctx, store) {
     ctx.aliases.map(function (a) { return a.alias + '→' + a.product + (a.pin ? '（' + a.pin + 'pin）' : ''); }).join('、');
 
   var content = [];
+  (imageBlobs || []).slice(0, 3).forEach(function (blob) {
+    content.push({ type: 'image', source: { type: 'base64', media_type: blob.getContentType(), data: Utilities.base64Encode(blob.getBytes()) } });
+  });
   images.slice(0, 3).forEach(function (img) {
     var blob = lineContent_(img.messageId);
     if (blob) content.push({ type: 'image', source: { type: 'base64', media_type: blob.getContentType(), data: Utilities.base64Encode(blob.getBytes()) } });

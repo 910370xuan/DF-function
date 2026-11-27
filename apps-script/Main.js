@@ -16,7 +16,8 @@ var SHEET = {
 };
 var ALIAS_HEADERS = ['客戶說法', '型號', 'pin（4 或 8，可空白）'];
 var PARSE_HEADERS = ['訊息（貼上客戶訊息）', '店家（可空白）', '有圖片', '判斷', '品項', '備註', '需確認原因', '上一筆訂單建議',
-  '正確答案（選填，例：GPB-2000A*10, DCB-6000*10, 8pin*2；4pin 與 8pin 分開寫）', '模型A', 'A判讀', 'A費用', '模型B', 'B判讀', 'B費用', '比對'];
+  '正確答案（選填，例：GPB-2000A*10, DCB-6000*10, 8pin*2；4pin 與 8pin 分開寫）', '模型A', 'A判讀', 'A費用', '模型B', 'B判讀', 'B費用', '比對',
+  '圖片（雲端硬碟連結，選填）'];
 
 var ORDER_HEADERS = ['訂單ID', '收單時間', '出貨日', '店家', '型號', '數量', '8pin數', '附註', '狀態', '批次', '單據編號', '來源', '系統訊息', '折讓金額', '已收金額', '確認', '價格組合'];
 var COL = {}; ORDER_HEADERS.forEach(function (h, i) { COL[h] = i; });
@@ -66,9 +67,9 @@ var CONFIG_DEFAULTS = [
   ['新客戶要發票價格組合', 'D(稅外加)', '新客戶不用工具但要統編發票時'],
   ['本公司人員', '', '公司同事的 LINE 名稱（逗號分隔），例如：李宗光,Jessica Tsai。他們在群組講的話不當訂單；他們私訊官方帳號替店家下單時，自動用「業務代訂」逐則判斷店家'],
   ['AI判讀', false, '勾選後，規則判斷不了的訊息交給 Claude 判讀（需先設定金鑰）'],
-  ['AI模型', 'claude-opus-5-5', '可改 claude-haiku-5-5（較便宜）'],
+  ['AI模型', 'claude-haiku-5-5', 'claude-haiku-5-5（便宜、快）或 claude-opus-5-5（較準、約貴 40 倍）'],
   ['AI思考強度', 'low', 'low / medium / high'],
-  ['AI比較模型', 'claude-haiku-5-5', '「AI 模型比較」時和「AI模型」一起比較的第二個模型'],
+  ['AI比較模型', '', '「AI 模型比較」時要一起比較的第二個模型；空白＝只測「AI模型」'],
   ['AI每月上限美元', 5, '本月 AI 估計費用超過這個金額就停止呼叫，改由客服判斷；0＝不限制（費用明細見「AI使用紀錄」）']
 ];
 
@@ -83,7 +84,7 @@ function onOpen() {
     .addItem('立即處理 LINE 訊息', 'menuProcessLine')
     .addItem('設定金鑰（LINE／Claude）', 'menuSetKeys')
     .addItem('AI 連線測試', 'menuTestAi')
-    .addItem('AI 模型比較（解析測試的訊息）', 'menuCompareModels')
+    .addItem('AI 判讀測試（解析測試的訊息）', 'menuCompareModels')
     .addItem('同步廠商清冊', 'syncVendors')
     .addItem('清理產單暫存試算表', 'cleanupTempSheets')
     .addItem('整理表格外觀', 'menuFormatSheets')
@@ -735,7 +736,7 @@ function menuCompareModels() {
   sh.getRange(1, 1, 1, PARSE_HEADERS.length).setValues([PARSE_HEADERS]).setFontWeight('bold');
   var n = sh.getLastRow() - 1;
   if (n < 1) { showResult_({ message: '請先在「解析測試」A 欄貼上客戶訊息（一格一段），I 欄可填正確答案' }); return; }
-  var models = [String(cfg['AI模型'] || 'claude-opus-5-5').trim(), String(cfg['AI比較模型'] || 'claude-haiku-5-5').trim()];
+  var models = [String(cfg['AI模型'] || 'claude-haiku-5-5').trim(), String(cfg['AI比較模型'] || '').trim()].filter(String);
   var base = { aliases: readAliases_(), products: unique_(readProducts_()), history: null };
   var data = sh.getRange(2, 1, n, PARSE_HEADERS.length).getValues();
   var done = 0, score = [0, 0], graded = 0, cost = [0, 0], started = Date.now();
@@ -746,16 +747,24 @@ function menuCompareModels() {
     var expected = String(data[i][8]).trim();
     var expKey = expected ? itemsKey_(Parser.parse(expected, { aliases: base.aliases }).items) : '';
     var out = [];
+    var blobs = [];
+    var link = String(data[i][16] || '').trim();
+    if (link) {
+      var fid = (link.match(/[-\w]{25,}/) || [])[0];
+      try { if (fid) blobs.push(DriveApp.getFileById(fid).getBlob()); } catch (e) { out.push('', '❌ 圖片讀取失敗：請確認連結是雲端硬碟檔案且你有權限', ''); }
+    }
     models.forEach(function (m, k) {
       var c = Object.assign({}, base, { cfg: Object.assign({}, cfg, { 'AI模型': m }) });
-      var r = askClaude_(text, [], c, store);
+      var r = askClaude_(text, [], c, store, blobs);
       if (r.error) { out.push(m, '❌ ' + r.error, ''); return; }
       var key = itemsKey_(r.items);
       cost[k] += r.cost;
       out.push(r.model, (key || '（無品項）') + (r.concerns.length ? '\n疑點：' + r.concerns.join('；') : ''), Math.round(r.cost * 10000) / 10000);
       if (expKey) { if (key === expKey) score[k]++; out[out.length - 2] = (key === expKey ? '✅ ' : '❌ ') + out[out.length - 2]; }
     });
-    var verdict = expKey ? (out[1].indexOf('✅') === 0 ? 'A對' : 'A錯') + '／' + (out[4].indexOf('✅') === 0 ? 'B對' : 'B錯') : '（未填正確答案）';
+    while (out.length < 6) out.push('');
+    out = out.slice(0, 6);
+    var verdict = !expKey ? '（未填正確答案）' : (out[1].indexOf('✅') === 0 ? 'A對' : 'A錯') + (models[1] ? '／' + (out[4].indexOf('✅') === 0 ? 'B對' : 'B錯') : '');
     if (expKey) graded++;
     sh.getRange(i + 2, 10, 1, 7).setValues([out.concat([verdict])]);
     done++;
@@ -763,8 +772,8 @@ function menuCompareModels() {
   sh.getRange(2, 11, n, 1).setWrap(true);
   sh.getRange(2, 14, n, 1).setWrap(true);
   var msg = '本次比較 ' + done + ' 則訊息\n\n' +
-    'A：' + models[0] + (graded ? '　答對 ' + score[0] + '/' + graded : '') + '　費用 US$' + cost[0].toFixed(4) + '\n' +
-    'B：' + models[1] + (graded ? '　答對 ' + score[1] + '/' + graded : '') + '　費用 US$' + cost[1].toFixed(4) +
+    'A：' + models[0] + (graded ? '　答對 ' + score[0] + '/' + graded : '') + '　費用 US$' + cost[0].toFixed(4) +
+    (models[1] ? '\nB：' + models[1] + (graded ? '　答對 ' + score[1] + '/' + graded : '') + '　費用 US$' + cost[1].toFixed(4) : '') +
     (done === 15 ? '\n\n還有沒比較的訊息，請再執行一次。' : '') +
     '\n\n在 I 欄填正確答案就能自動評分；要重跑某一列，清空那一列的 J～P 欄。';
   showResult_({ message: msg });
@@ -831,6 +840,15 @@ function setupCore_() {
 
   var cfg = ensureSheet_(SHEET.CONFIG, ['項目', '值', '說明']);
   var obsolete = ['出貨單第一聯列', '出貨單第二聯列', '列印欄數', '出貨單PDF參數', '貨運單PDF參數', '出貨單列印設定', '貨運單列印設定', 'PDF字型', '出貨單字型', '貨運單字型'];
+  // 依使用者決定改用 Haiku、只測一個模型（只改一次）
+  if (!PropertiesService.getScriptProperties().getProperty('haiku1')) {
+    for (var rh = 2; rh <= cfg.getLastRow(); rh++) {
+      var kh = cfg.getRange(rh, 1).getValue();
+      if (kh === 'AI模型') cfg.getRange(rh, 2).setValue('claude-haiku-5-5');
+      if (kh === 'AI比較模型') cfg.getRange(rh, 2).setValue('');
+    }
+    PropertiesService.getScriptProperties().setProperty('haiku1', '1');
+  }
   // 回收改為寫入主檔回收統計：舊版預設不勾選的「記錄回收」改為勾選一次
   if (!PropertiesService.getScriptProperties().getProperty('recycle2')) {
     for (var ry = 2; ry <= cfg.getLastRow(); ry++) {
