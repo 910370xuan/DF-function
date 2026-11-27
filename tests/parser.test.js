@@ -195,3 +195,62 @@ test('歷史：店名括號不影響、優先電池型號；最常買型號', ()
   assert.strictEqual(Parser.topProduct('麒鎮車業行', table), 'GBC-4000');
   assert.strictEqual(Parser.topProduct('別家', table, prefer), '');
 });
+
+test('新樣本：威利（打錯型號、中文數量、8pin 另訂、地址）', () => {
+  const r = p('您好我要訂\nGPB-6000直流電力盒十顆、另外要多訂兩顆8pin的直流電力盒，送新北市中和區景平路319號1樓，謝謝', { today: '2026-11-25' });
+  assert.deepStrictEqual(r.items, [{ product: 'DCB-6000', qty: 12, pin8: 2 }]);
+  assert.strictEqual(r.kind, 'order', r.reasons.join());
+  assert.strictEqual(r.shipDate, '');
+});
+
+test('新樣本：威利車業 DCB-6000x10、可樂 2000A*10+1 不須工具', () => {
+  const a = p('您好，我要訂DCB-6000x10顆，寄至新北市新店區寶橋路199號1樓，謝謝', { today: '2026-10-01' });
+  assert.deepStrictEqual(a.items, [{ product: 'DCB-6000', qty: 10, pin8: 0 }]);
+  assert.strictEqual(a.kind, 'order', a.reasons.join());
+  const b = p('你好,我們一店需要\n2000A*10+1\n不須工具\n\n可樂中興一店\n臺中市大里區中興路一段338號', { today: '2026-09-21' });
+  assert.deepStrictEqual(b.items, [{ product: 'GPB-2000A', qty: 10, pin8: 0 }]);
+  assert.deepStrictEqual(b.notes, ['不需工具']);
+  assert.strictEqual(b.kind, 'order', b.reasons.join());
+});
+
+test('中文數字', () => {
+  assert.deepStrictEqual(p('GPB-2000 二十顆').items, [{ product: 'GPB-2000', qty: 20, pin8: 0 }]);
+  assert.deepStrictEqual(p('A款 十二個').items, [{ product: 'GPB-2000A', qty: 12, pin8: 0 }]);
+  assert.deepStrictEqual(p('我要一組這個', { hasImage: true }).items, []);
+});
+
+test('金額不當成型號', () => {
+  assert.strictEqual(p('已經匯了6000元給你').kind, 'not_order');
+  assert.strictEqual(p('轉帳 $2000 謝謝').kind, 'not_order');
+});
+
+test('從地址或分店名判斷是哪家店', () => {
+  const v = [
+    { name: '威利電動機車-中和', address: '235新北市中和區景平路319號1樓' },
+    { name: '威利電動機車-新店', address: '231 新北市新店區寶橋路199號1樓' },
+    { name: '可樂中興一店', address: '412臺中市大里區中興路一段338號' },
+    { name: '可樂中興二店', address: '412台中市大里區中興路二段599號' },
+    { name: '格錸車業', address: '高雄市三民區民族一路100號' }
+  ];
+  assert.strictEqual(Parser.matchStore('GPB-6000直流電力盒十顆，送新北市中和區景平路319號1樓，謝謝', v), '威利電動機車-中和');
+  assert.strictEqual(Parser.matchStore('DCB-6000x10顆，寄至新北市新店區寶橋路199號1樓', v), '威利電動機車-新店');
+  assert.strictEqual(Parser.matchStore('我們二店需要 2000A*10+1 可樂中興二店 臺中市大里區中興路二段599號', v), '可樂中興二店');
+  assert.strictEqual(Parser.matchStore('我們一店需要 可樂中興一店', v, ['可樂中興一店', '可樂中興二店']), '可樂中興一店');
+  assert.strictEqual(Parser.matchStore('GPB-2000*3', v, ['可樂中興一店', '可樂中興二店']), '');
+  assert.strictEqual(Parser.matchStore('高雄gogoro社區店-格錸車業', v), '格錸車業');
+});
+
+test('新客戶資料擷取與預設價格組合', () => {
+  const a = Parser.extractContact('你好,我們一店需要\n2000A*10+1\n不須工具\n\n可樂中興一店\n臺中市大里區中興路一段338號');
+  assert.strictEqual(a.storeName, '可樂中興一店');
+  assert.strictEqual(a.address, '台中市大里區中興路一段338號');
+  assert.strictEqual(a.district, '台中市大里區');
+  const b = Parser.extractContact('新店家 速克達車業 統編 12345678 電話 0912-345-678 地址 235新北市中和區景平路319號1樓');
+  assert.strictEqual(b.storeName, '速克達車業');
+  assert.strictEqual(b.taxId, '12345678');
+  assert.strictEqual(b.phone, '0912-345-678');
+  assert.strictEqual(b.address, '235新北市中和區景平路319號1樓');
+  assert.strictEqual(Parser.newCustomerCombo('2000A*10 不須工具', []), 'A');
+  assert.strictEqual(Parser.newCustomerCombo('GPB-2000*10 工具*1', [{ product: '小電池工具組', qty: 1 }]), 'B');
+  assert.strictEqual(Parser.newCustomerCombo('GPB-2000*10 不用工具 要開發票', []), 'D(稅外加)');
+});

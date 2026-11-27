@@ -5,9 +5,10 @@
  */
 
 var LINE_SHEET = { LOG: '訊息紀錄', BIND: 'LINE帳號對照', TRIAL: 'LINE試跑' };
-var LOG_HEADERS = ['收到時間', '事件ID', 'LINE使用者ID', '類型', '內容', '訊息ID', '狀態', '段落ID', '判斷'];
-var BIND_HEADERS = ['LINE使用者ID', 'LINE名稱', '店家', '第一次出現', '備註', '系統建議店家'];
+var LOG_HEADERS = ['收到時間', '事件ID', '對話ID（個人或群組）', '類型', '內容', '訊息ID', '狀態', '段落ID', '判斷', '發話者ID', '發話者名稱'];
+var BIND_HEADERS = ['LINE對話ID（個人或群組）', 'LINE名稱', '店家', '第一次出現', '備註', '系統建議店家'];
 var LOG_COL = {}; LOG_HEADERS.forEach(function (h, i) { LOG_COL[h] = i; });
+LOG_COL['LINE使用者ID'] = LOG_COL['對話ID（個人或群組）']; // 舊名稱相容
 
 /* ───────────── 接收 ───────────── */
 
@@ -29,34 +30,80 @@ function text_(s) { return ContentService.createTextOutput(s); }
 function storeEvents_(events) {
   var cache = CacheService.getScriptCache();
   var log = ensureSheet_(LINE_SHEET.LOG, LOG_HEADERS);
+  var staff = null;
   events.forEach(function (ev) {
-    if (ev.type !== 'message' || !ev.source || ev.source.type !== 'user') return;
+    var src = ev.source || {};
+    if (ev.type !== 'message' || ['user', 'group', 'room'].indexOf(src.type) < 0) return;
     var id = ev.webhookEventId || (ev.message && ev.message.id);
     if (cache.get('ev:' + id)) return; // LINE 重送的同一事件
     cache.put('ev:' + id, '1', 21600);
     var m = ev.message;
     var content = m.type === 'text' ? m.text : ({ image: '[圖片]', sticker: '[貼圖]', video: '[影片]', audio: '[語音]', file: '[檔案]', location: '[位置]' }[m.type] || '[' + m.type + ']');
-    log.appendRow([new Date(ev.timestamp), id, ev.source.userId, m.type, content, m.id, '未處理', '', '']);
-    ensureBinding_(ev.source.userId, m.type === 'text' ? m.text : '');
+    var chat = src.groupId || src.roomId || src.userId;
+    var sender = src.userId || '';
+    var senderName = '', status = '未處理';
+    if (src.type !== 'user') {
+      // 群組：記下是誰說的；公司同事在群組講的話不當成訂單
+      senderName = sender ? lineMemberName_(src, sender) : '';
+      staff = staff || splitList_(readConfig_()['本公司人員']);
+      if (senderName && staff.some(function (n) { return senderName.indexOf(n) >= 0; })) status = '本公司';
+    }
+    log.appendRow([new Date(ev.timestamp), id, chat, m.type, content, m.id, status, '', status === '本公司' ? '本公司人員' : '', sender, senderName]);
+    if (status === '未處理') ensureBinding_(chat, m.type === 'text' ? m.text : '', src);
   });
 }
 
-function ensureBinding_(userId, text) {
+/** 個人帳號、群組各一列；同一個對話可以有多列＝綁多家店 */
+function ensureBinding_(chatId, text, src) {
   var sh = ensureSheet_(LINE_SHEET.BIND, BIND_HEADERS);
   if (sh.getLastRow() > 1) {
     var rows = sh.getRange(2, 1, sh.getLastRow() - 1, 6).getValues();
-    for (var i = 0; i < rows.length; i++) {
-      if (rows[i][0] !== userId) continue;
+    var mine = [];
+    rows.forEach(function (r, i) { if (r[0] === chatId) mine.push(i); });
+    if (mine.length) {
       // 還沒綁定、也還沒有建議：用新訊息再試一次
-      if (!String(rows[i][2]).trim() && !String(rows[i][5]).trim() && text) {
-        var sug = Parser.suggestVendor([rows[i][1], text], readVendorNames_());
-        if (sug) sh.getRange(i + 2, 6).setValue(sug);
+      var i0 = mine[0];
+      if (mine.length === 1 && !String(rows[i0][2]).trim() && !String(rows[i0][5]).trim() && text) {
+        var sug = guessStore_([rows[i0][1], text].join(' '));
+        if (sug) sh.getRange(i0 + 2, 6).setValue(sug);
       }
       return;
     }
   }
-  var name = lineProfileName_(userId);
-  sh.appendRow([userId, name, '', new Date(), '', Parser.suggestVendor([name, text], readVendorNames_())]);
+  var name = src && src.type === 'group' ? '群組：' + lineGroupName_(src.groupId) :
+    src && src.type === 'room' ? '多人聊天' : lineProfileName_(chatId);
+  sh.appendRow([chatId, name, '', new Date(), '', guessStore_([name, text].join(' '))]);
+}
+
+/** 用店名或地址從廠商清冊猜是哪家店 */
+function guessStore_(text) {
+  return Parser.matchStore(text, readVendorInfo_()) || '';
+}
+
+function lineGroupName_(groupId) {
+  var token = PropertiesService.getScriptProperties().getProperty('LINE_TOKEN');
+  if (!token) return '';
+  var res = UrlFetchApp.fetch('https://api.line.me/v2/bot/group/' + encodeURIComponent(groupId) + '/summary', {
+    headers: { Authorization: 'Bearer ' + token }, muteHttpExceptions: true
+  });
+  return res.getResponseCode() === 200 ? JSON.parse(res.getContentText()).groupName : '';
+}
+
+/** 群組成員名稱（快取 6 小時） */
+function lineMemberName_(src, userId) {
+  var cache = CacheService.getScriptCache();
+  var key = 'mem:' + userId;
+  var hit = cache.get(key);
+  if (hit) return hit;
+  var token = PropertiesService.getScriptProperties().getProperty('LINE_TOKEN');
+  if (!token) return '';
+  var path = src.type === 'group' ? 'group/' + encodeURIComponent(src.groupId) : 'room/' + encodeURIComponent(src.roomId);
+  var res = UrlFetchApp.fetch('https://api.line.me/v2/bot/' + path + '/member/' + encodeURIComponent(userId), {
+    headers: { Authorization: 'Bearer ' + token }, muteHttpExceptions: true
+  });
+  var name = res.getResponseCode() === 200 ? JSON.parse(res.getContentText()).displayName : '';
+  if (name) cache.put(key, name, 21600);
+  return name;
 }
 
 function lineProfileName_(userId) {
@@ -92,9 +139,12 @@ function processLine_(force) {
     var eid = r[LOG_COL['事件ID']];
     if (seen[eid]) { log.getRange(i + 2, LOG_COL['狀態'] + 1).setValue('重複'); return; }
     seen[eid] = true;
+    var chat = r[LOG_COL['對話ID（個人或群組）']], sender = r[LOG_COL['發話者ID']] || '';
+    var isGroup = /^[CR]/.test(String(chat)); // 群組 ID 以 C 開頭、多人聊天以 R 開頭
     msgs.push({
-      row: i + 2, ts: new Date(r[LOG_COL['收到時間']]).getTime(), userId: r[LOG_COL['LINE使用者ID']],
-      type: r[LOG_COL['類型']], text: String(r[LOG_COL['內容']]), messageId: r[LOG_COL['訊息ID']]
+      row: i + 2, ts: new Date(r[LOG_COL['收到時間']]).getTime(),
+      userId: isGroup && sender ? chat + '|' + sender : chat, // 合併訊息的單位：個人；群組裡依發話者分開
+      chat: chat, type: r[LOG_COL['類型']], text: String(r[LOG_COL['內容']]), messageId: r[LOG_COL['訊息ID']]
     });
   });
   if (!msgs.length) { notifyUnbound_(); return '沒有待處理的訊息'; }
@@ -104,7 +154,7 @@ function processLine_(force) {
   var segs = Core.readySegments(msgs, Date.now(), (Number(cfg['合併等待分鐘']) || 10) * 60000, forceNow);
   var ctx = {
     cfg: cfg, aliases: readAliases_(), products: unique_(readProducts_()), holidays: readHolidays_(),
-    bindings: readBindings_(), history: null, today: fmtDate_(new Date())
+    bindings: readBindings_(), vendorInfo: readVendorInfo_(), history: null, today: fmtDate_(new Date())
   };
   var counts = { order: 0, unclear: 0, not_order: 0 };
   segs.forEach(function (seg) {
@@ -133,9 +183,18 @@ function handleSegment_(seg, ctx, log) {
   };
   if (res.kind === 'not_order') { mark('非訂單'); return 'not_order'; }
 
-  var bound = ctx.bindings[seg.userId] || '';
+  var chat = seg.msgs[0].chat || seg.userId;
+  var vendorNames = ctx.vendors || (ctx.vendors = readVendorNames_());
   // 廠商清冊改名（例如加上「(午後收貨)」）後仍對得上
-  var store = bound ? (Core.resolveVendor(bound, ctx.vendors || (ctx.vendors = readVendorNames_())) || bound) : '';
+  var bound = (ctx.bindings[chat] || []).map(function (b) { return Core.resolveVendor(b, vendorNames) || b; });
+  var store = '', storeNote = '';
+  if (bound.length === 1) {
+    store = bound[0];
+  } else if (bound.length > 1) {
+    // 多店帳號／群組：從訊息裡的分店名或地址判斷
+    store = Parser.matchStore(text, ctx.vendorInfo, bound);
+    if (!store) storeNote = '這個帳號／群組綁了多家店（' + bound.join('、') + '），訊息沒寫是哪一家，請選擇店家';
+  }
   var items = res.items.slice(), reasons = res.reasons.slice(), notes = res.notes.slice();
   var kind = res.kind;
 
@@ -162,9 +221,11 @@ function handleSegment_(seg, ctx, log) {
       reasons.push('品項由 AI 判讀，請核對');
     }
   }
-  if (!store) {
-    var hint = Parser.suggestVendor([text], ctx.vendors || (ctx.vendors = readVendorNames_()));
-    reasons.push('LINE 帳號尚未綁定店家，請到「LINE帳號對照」選擇店家' + (hint ? '（系統建議：' + hint + '）' : '（廠商清冊找不到相符店名，可能是新客戶，請先在主檔建檔）'));
+  if (storeNote) reasons.push(storeNote);
+  else if (!store) {
+    var hint = Parser.matchStore(text, ctx.vendorInfo);
+    reasons.push('LINE 帳號尚未綁定店家，請到「LINE帳號對照」選擇店家' + (hint ? '（系統建議：' + hint + '）' : '（廠商清冊找不到相符店名或地址，可能是新客戶，已建立「新客戶待建檔」草稿）'));
+    if (!hint) draftNewCustomer_(chat, text, res, items);
   }
 
   var ship = Core.inferShipDate(recvDate, recvHm, {
@@ -261,13 +322,27 @@ function readBindings_() {
   var map = {};
   if (sh.getLastRow() < 2) return map;
   sh.getRange(2, 1, sh.getLastRow() - 1, 3).getValues().forEach(function (r) {
-    if (r[0] && String(r[2]).trim()) map[r[0]] = String(r[2]).trim();
+    var st = String(r[2]).trim();
+    if (!r[0] || !st) return;
+    map[r[0]] = map[r[0]] || [];
+    if (map[r[0]].indexOf(st) < 0) map[r[0]].push(st);
   });
   return map;
 }
 
 /** 綁定店家後，把這個帳號尚未填店家的訂單列補上 */
 function applyBinding_(userId, store) {
+  // 直接綁定舊客戶時，這個對話的新客戶草稿就不需要了
+  var draft = SpreadsheetApp.getActive().getSheetByName(NEW_SHEET);
+  if (draft && draft.getLastRow() > 1) {
+    draft.getRange(2, 1, draft.getLastRow() - 1, NEW_HEADERS.length).getValues().forEach(function (r, i) {
+      if (r[NC['LINE對話ID']] === userId && String(r[NC['狀態']]).indexOf('已建檔') !== 0) {
+        draft.getRange(i + 2, NC['狀態'] + 1).setValue('已綁定既有店家「' + store + '」，不需建檔');
+      }
+    });
+  }
+  var all = readBindings_()[userId] || [];
+  if (all.length > 1) return; // 多店帳號：每筆訂單的店家要個別確認，不自動補
   [SHEET.ORDERS, LINE_SHEET.TRIAL].forEach(function (name) {
     var sh = SpreadsheetApp.getActive().getSheetByName(name);
     if (!sh || sh.getLastRow() < 2) return;

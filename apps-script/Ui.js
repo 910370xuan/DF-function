@@ -47,6 +47,7 @@ function formatSheets_() {
     sh.getRange(2, 3, sh.getMaxRows() - 1, 1).setDataValidation(SpreadsheetApp.newDataValidation()
       .requireValueInList(['4', '8'], true).setAllowInvalid(true).build());
   });
+  step('新客戶待建檔', function () { formatNewCustomerSheet_(ensureSheet_(NEW_SHEET, NEW_HEADERS)); });
   step('訊息紀錄', function () { formatSimple_(ss.getSheetByName(LINE_SHEET.LOG), { 1: 150, 2: 60, 3: 60, 4: 70, 5: 440, 6: 60, 7: 90, 8: 60, 9: 110 }, [2, 3, 6, 8]); });
   step('批次紀錄', function () { formatSimple_(ss.getSheetByName(SHEET.BATCHES), { 1: 120, 2: 150, 3: 80, 4: 80, 5: 280, 6: 130, 7: 130, 8: 130, 9: 170, 10: 130 }, []); });
   step('設定', function () { formatConfig_(ss.getSheetByName(SHEET.CONFIG)); });
@@ -170,10 +171,10 @@ function buildOverview_() {
 /** 分頁順序：常用在前，模板與紀錄在後並標灰 */
 function arrangeTabs_() {
   var ss = SpreadsheetApp.getActive();
-  var order = ['總覽', SHEET.ORDERS, LINE_SHEET.TRIAL, LINE_SHEET.BIND, SHEET.CONFIG, SHEET.ALIASES, SHEET.HOLIDAYS, SHEET.PARSE_TEST,
+  var order = ['總覽', SHEET.ORDERS, LINE_SHEET.TRIAL, LINE_SHEET.BIND, NEW_SHEET, SHEET.CONFIG, SHEET.ALIASES, SHEET.HOLIDAYS, SHEET.PARSE_TEST,
     LINE_SHEET.LOG, SHEET.BATCHES, SHEET.INVOICE, SHEET.LABEL, SHEET.VENDORS];
   var colors = {};
-  colors[SHEET.ORDERS] = '#2f7d4f'; colors[LINE_SHEET.TRIAL] = '#7fa8ee'; colors[LINE_SHEET.BIND] = '#f6c453';
+  colors[SHEET.ORDERS] = '#2f7d4f'; colors[LINE_SHEET.TRIAL] = '#7fa8ee'; colors[LINE_SHEET.BIND] = '#f6c453'; colors[NEW_SHEET] = '#a3620a';
   [LINE_SHEET.LOG, SHEET.BATCHES, SHEET.INVOICE, SHEET.LABEL, SHEET.VENDORS].forEach(function (n) { colors[n] = '#9aa3af'; });
   var pos = 1;
   order.forEach(function (name) {

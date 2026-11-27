@@ -12,6 +12,7 @@ const out = [
   read('Xlsx.js'),
   read('Main.js'),
   read('Line.js'),
+  read('Customers.js'),
   read('Ui.js')
 ].join('\n\n');
 fs.mkdirSync(path.join(root, 'dist'), { recursive: true });

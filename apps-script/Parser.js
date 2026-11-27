@@ -5,10 +5,11 @@
 var Parser = (function () {
   /** 預設型號對照（試算表「型號對照」可增修）。pin：4 / 8 表示同時指定 DCB-6000 的 pin 數 */
   var DEFAULT_ALIASES = [
-    ['GPB-2000A', 'GPB-2000A'], ['A款', 'GPB-2000A'],
-    ['GPB-2000S', 'GPB-2000S'], ['S款', 'GPB-2000S'],
+    ['GPB-2000A', 'GPB-2000A'], ['A款', 'GPB-2000A'], ['2000A', 'GPB-2000A'],
+    ['GPB-2000S', 'GPB-2000S'], ['S款', 'GPB-2000S'], ['2000S', 'GPB-2000S'],
     ['GPB-2000', 'GPB-2000'], ['GPB2000', 'GPB-2000'], ['一般的', 'GPB-2000'], ['2000', 'GPB-2000'],
-    ['DCB-6000', 'DCB-6000'], ['DCB6000', 'DCB-6000'], ['直流電力盒', 'DCB-6000'], ['電力盒', 'DCB-6000'],
+    ['DCB-6000', 'DCB-6000'], ['DCB6000', 'DCB-6000'], ['GPB-6000', 'DCB-6000'], ['6000', 'DCB-6000'],
+    ['直流電力盒', 'DCB-6000'], ['電力盒', 'DCB-6000'],
     ['直流', 'DCB-6000'], ['DC BOX', 'DCB-6000'], ['DCBOX', 'DCB-6000'],
     ['4PIN', 'DCB-6000', 4], ['8PIN', 'DCB-6000', 8],
     ['GPB-3600', 'GPB-3600'], ['方形小電池', 'GPB-3600'], ['方形', 'GPB-3600'], ['鉛酸', 'GPB-3600'],
@@ -31,7 +32,16 @@ var Parser = (function () {
   var MOD_ADD = /追加|多加|再加|加訂|另外再/;
   var MOD_CANCEL = /取消|不要了|先取消/;
   var WEEKDAY = { '一': 1, '二': 2, '三': 3, '四': 4, '五': 5, '六': 6, '日': 7, '天': 7 };
-  var VAGUE_DATE = /月底|月初|過幾天|改天|之後再|下週(?![一二三四五六日天])|下周(?![一二三四五六日天])|下禮拜(?![一二三四五六日天])|下星期(?![一二三四五六日天])/;  var NO_TOOL = /(不需|不用|不要|免)(要)?(帶)?(小電池)?工具(組)?/g;
+  var VAGUE_DATE = /月底|月初|過幾天|改天|之後再|下週(?![一二三四五六日天])|下周(?![一二三四五六日天])|下禮拜(?![一二三四五六日天])|下星期(?![一二三四五六日天])/;  var NO_TOOL = /(不需|不須|不用|不要|免|無須|無需)(要)?(帶)?(小電池)?工具(組)?/g;
+
+  var CN_DIGIT = { '零': 0, '〇': 0, '一': 1, '二': 2, '兩': 2, '两': 2, '三': 3, '四': 4, '五': 5, '六': 6, '七': 7, '八': 8, '九': 9 };
+  /** 中文數字（一～九十九、兩）轉阿拉伯數字；無法轉換回傳 NaN */
+  function cnNumber(s) {
+    if (/^[零〇一二兩两三四五六七八九]$/.test(s)) return CN_DIGIT[s];
+    var m = s.match(/^([一二兩两三四五六七八九])?十([一二三四五六七八九])?$/);
+    if (m) return (m[1] ? CN_DIGIT[m[1]] : 1) * 10 + (m[2] ? CN_DIGIT[m[2]] : 0);
+    return NaN;
+  }
 
   function normalize(text) {
     return String(text || '')
@@ -49,7 +59,7 @@ var Parser = (function () {
     var taken = [], hits = [];
     sorted.forEach(function (a) {
       var key = normalize(a.alias);
-      var re = new RegExp(/^\d+$/.test(key) ? '(?<![\\d\\-])' + escapeRe(key) + '(?![\\dA-Z])' : escapeRe(key), 'g');
+      var re = new RegExp(/^\d+$/.test(key) ? '(?<![\\d\\-$])' + escapeRe(key) + '(?![\\dA-Z元塊])' : escapeRe(key), 'g');
       var m;
       while ((m = re.exec(line))) {
         var s = m.index, e = s + m[0].length;
@@ -87,7 +97,12 @@ var Parser = (function () {
   function parse(text, opts) {
     opts = opts || {};
     var aliases = opts.aliases || DEFAULT_ALIASES;
-    var raw = normalize(text);
+    var raw = normalize(text)
+      // 「十顆」「兩顆」等中文數量 → 數字（只轉後面接單位的，避免「一店」被改掉）
+      .replace(/([零〇一二兩两三四五六七八九十]{1,3})\s*(顆|個|組|台|付|副|片|入|盒|PCS)/g, function (all, n, u) {
+        var v = cnNumber(n);
+        return isNaN(v) ? all : v + u;
+      });
     if (opts.today) {
       // 客戶在訊息開頭寫的當天日期只是抬頭，不算指定出貨日
       var t = opts.today.split('-').map(Number);
@@ -116,7 +131,7 @@ var Parser = (function () {
       hits.forEach(function (h) {
         var last = groups[groups.length - 1];
         if (last && last.product === 'DCB-6000' && h.product === 'DCB-6000' &&
-            /^[\s()]*$/.test(line.slice(last.end, h.start))) {
+            /^[\s()的]*$/.test(line.slice(last.end, h.start))) {
           last.end = h.end; if (h.pin) last.pin = h.pin;
         } else {
           groups.push({ start: h.start, end: h.end, product: h.product, pin: h.pin, pinOnly: h.pinOnly });
@@ -301,12 +316,82 @@ var Parser = (function () {
     return tie ? '' : best;
   }
 
+  /** 地址比對用：台/臺統一、去空白、去郵遞區號、只取到「號」 */
+  function addrKey(a) {
+    var s = normalize(a).replace(/臺/g, '台').replace(/\s+/g, '').replace(/^\d{3,6}/, '');
+    var i = s.indexOf('號');
+    return i >= 0 ? s.slice(0, i + 1) : s;
+  }
+
+  /** 地址的「路段＋門牌」部分，例：新北市中和區景平路319號 → 景平路319號 */
+  function streetKey(a) {
+    var k = addrKey(a);
+    var m = k.match(/^.*?[縣市].*?[區鄉鎮市](.+號)$/);
+    return m ? m[1] : (/號$/.test(k) ? k : '');
+  }
+
+  /**
+   * 從訊息判斷是哪一家店（多店帳號、群組下單用）：
+   * 1. 訊息中的地址（路段＋門牌）與廠商清冊送貨地址相同
+   * 2. 訊息中出現店名（完整或去掉「車業」等字尾）
+   * vendors：[{ name, address }]；candidates：只在這些店裡找（可省略）
+   * 只有唯一結果才回傳，否則回傳 ''。
+   */
+  function matchStore(text, vendors, candidates) {
+    var hay = normalize(text).replace(/臺/g, '台').replace(/\s+/g, '');
+    var pool = (vendors || []).filter(function (v) { return v && v.name && (!candidates || candidates.indexOf(v.name) >= 0); });
+    var byAddr = pool.filter(function (v) { var k = streetKey(v.address || ''); return k.length >= 5 && hay.indexOf(k) >= 0; });
+    if (byAddr.length === 1) return byAddr[0].name;
+    var names = pool.map(function (v) { return v.name; });
+    var byName = suggestVendor([text], byAddr.length > 1 ? byAddr.map(function (v) { return v.name; }) : names);
+    return byName || '';
+  }
+
+  /**
+   * 新客戶：從訊息抓店名、地址、電話、統編（抓不到留空，由客服補）
+   */
+  function extractContact(text) {
+    var raw = normalize(text).replace(/臺/g, '台');
+    var out = { storeName: '', address: '', phone: '', taxId: '', district: '' };
+    var ph = raw.match(/(?:^|[^\d])(09\d{2}[-\s]?\d{3}[-\s]?\d{3}|0\d{1,2}[-\s]?\d{3,4}[-\s]?\d{4})(?!\d)/);
+    if (ph) out.phone = ph[1].replace(/\s/g, '');
+    var tx = raw.match(/(?:統編|統一編號)[^\d]{0,4}(\d{8})(?!\d)/);
+    if (tx) out.taxId = tx[1];
+    var ad = raw.match(/(\d{3,6})?\s*([^\s,，。:：]{2,4}?[縣市][^\s,，。:：]{1,4}?[區鄉鎮市][^\s,，。:：]+?號(?:之\d+)?(?:\d+樓)?(?:之\d+)?)/);
+    if (ad) {
+      out.address = (ad[1] || '') + ad[2];
+      var dm = ad[2].match(/^(.{2,4}?[縣市].{1,4}?[區鄉鎮市])/);
+      if (dm) out.district = dm[1];
+    }
+    var lines = String(text || '').split(/[\n\r,，。]+/).map(function (l) { return l.trim(); }).filter(String);
+    for (var i = 0; i < lines.length; i++) {
+      // 同一行若含地址，先把地址拿掉再找店名
+      var l = normalize(lines[i]).replace(/臺/g, '台');
+      if (out.address) l = l.replace(out.address.replace(/^\d+/, ''), ' ');
+      if (/\d{2,}/.test(l) && !/店|車業|車行/.test(l)) continue;
+      var m = l.match(/([^\s，,。:：我們是的]{2,16}(?:車業行|車業|機車行|車行|電動車|電動機車|動能|電能|科技|企業社|商行|工作室|社區店|一店|二店|三店|分店|店))/);
+      if (m && !/需要|要訂|叫貨|訂貨/.test(m[1])) { out.storeName = m[1]; break; }
+    }
+    return out;
+  }
+
+  /** 新客戶預設價格組合：要工具 → B；不用工具但要發票 → D(稅外加)；其他 → A */
+  function newCustomerCombo(text, items, combos) {
+    combos = combos || {};
+    var raw = normalize(text);
+    var noTool = /(不需|不須|不用|不要|免|無須|無需)(要)?(帶)?(小電池)?工具/.test(raw);
+    var wantsTool = !noTool && ((items || []).some(function (it) { return it.product === '小電池工具組'; }) || /工具/.test(raw));
+    if (wantsTool) return combos.tool || 'B';
+    if (/統編|發票|收據/.test(raw)) return combos.invoice || 'D(稅外加)';
+    return combos.base || 'A';
+  }
+
   function unique(arr) { return arr.filter(function (x, i) { return arr.indexOf(x) === i; }); }
 
   /** 新版才加入的對照，舊的「型號對照」工作表會自動補上 */
-  var ADDED_ALIASES = ['小電池工具組', '工具組', '工具'];
+  var ADDED_ALIASES = ['小電池工具組', '工具組', '工具', '2000A', '2000S', 'GPB-6000', '6000'];
 
-  return { DEFAULT_ALIASES: DEFAULT_ALIASES, ADDED_ALIASES: ADDED_ALIASES, recentFor: recentFor, storeKey: storeKey, topProduct: topProduct, suggestVendor: suggestVendor, extractDate: extractDate, normalize: normalize, parse: parse, suggestFromHistory: suggestFromHistory };
+  return { DEFAULT_ALIASES: DEFAULT_ALIASES, ADDED_ALIASES: ADDED_ALIASES, recentFor: recentFor, storeKey: storeKey, topProduct: topProduct, suggestVendor: suggestVendor, extractDate: extractDate, matchStore: matchStore, addrKey: addrKey, extractContact: extractContact, newCustomerCombo: newCustomerCombo, normalize: normalize, parse: parse, suggestFromHistory: suggestFromHistory };
 })();
 
 if (typeof module !== 'undefined') module.exports = Parser;

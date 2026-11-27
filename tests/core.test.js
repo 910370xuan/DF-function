@@ -211,3 +211,14 @@ test('店名改加括號註記仍對得上', () => {
   assert.deepStrictEqual(errors, []);
   assert.strictEqual(groups[0].store, '信耀車業(午後收貨)');
 });
+
+test('庫存管理出庫紀錄：每行一列，10+1 另列特贈', () => {
+  const rows = Core.ledgerRows({ store: '格錸車業', orderNo: '20BF11000000072',
+    lines: [{ product: 'GPB-2000', qty: 20, subtotal: 14400 }, { product: '小電池工具組', qty: 3, subtotal: 90 }] },
+    'D', { eligible: ['GPB-2000'], pay: '到付', batchId: '20261127-01' });
+  assert.deepStrictEqual(rows, [
+    ['D', '', '出庫', 'GPB-2000', 20, '系統', 'B2B廠商', '格錸車業', '到付', '單據 20BF11000000072／批次 20261127-01', 14400],
+    ['D', '', '出庫', 'GPB-2000', 2, '系統', '特贈', '格錸車業', '', '10+1 贈品／單據 20BF11000000072', ''],
+    ['D', '', '出庫', '小電池工具組', 3, '系統', 'B2B廠商', '格錸車業', '到付', '單據 20BF11000000072／批次 20261127-01', 90]
+  ]);
+});

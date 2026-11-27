@@ -203,6 +203,24 @@ var Core = (function () {
     return parts.join('；') + '。';
   }
 
+  /**
+   * 庫存管理出庫紀錄（照主檔「庫存管理」A～K 欄格式）：
+   * 日期、入庫、出庫、商品名稱、數量、建檔人員、出貨渠道、客戶名稱、收款狀況、備註、實收金額
+   * 每行品項一列；10+1 的贈品另起一列「特贈」。
+   * g: { store, orderNo, lines:[{product, qty, subtotal}] }
+   */
+  function ledgerRows(g, date, opts) {
+    opts = opts || {};
+    var rows = [];
+    g.lines.forEach(function (l) {
+      rows.push([date, '', '出庫', l.product, l.qty, opts.staff || '系統', opts.channel || 'B2B廠商', g.store, opts.pay || '',
+        '單據 ' + g.orderNo + (opts.batchId ? '／批次 ' + opts.batchId : ''), l.subtotal === '' || l.subtotal == null ? '' : Number(l.subtotal) || 0]);
+      var gift = giftQty(l.qty, l.product, opts.eligible);
+      if (gift > 0) rows.push([date, '', '出庫', l.product, gift, opts.staff || '系統', '特贈', g.store, '', '10+1 贈品／單據 ' + g.orderNo, '']);
+    });
+    return rows;
+  }
+
   /** 貨運單：每張工作表 6 格（2 頁 × 3 格），8 家 → [[6 家], [2 家]] → 3+3+2 頁 */
   function chunkLabels(stores) {
     var out = [];
@@ -330,6 +348,7 @@ var Core = (function () {
     giftQty: giftQty,
     buildNote: buildNote,
     buildGroups: buildGroups,
+    ledgerRows: ledgerRows,
     mergeSameProduct: mergeSameProduct,
     chunkLabels: chunkLabels,
     labelPagesFor: labelPagesFor,

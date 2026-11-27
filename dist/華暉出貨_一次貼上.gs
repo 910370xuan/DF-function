@@ -1,6 +1,6 @@
 /* 華暉出貨自動化：請整份貼進 Apps Script 的 Code.gs（取代原本內容）。由 scripts/bundle.js 產生，請勿手改。 */
 
-var APP_VERSION = '2026-11-27 04:31';
+var APP_VERSION = '2026-11-27 04:47';
 
 /**
  * 純邏輯（不呼叫任何 Google 服務），Apps Script 與 Node 測試共用。
@@ -207,6 +207,24 @@ var Core = (function () {
     return parts.join('；') + '。';
   }
 
+  /**
+   * 庫存管理出庫紀錄（照主檔「庫存管理」A～K 欄格式）：
+   * 日期、入庫、出庫、商品名稱、數量、建檔人員、出貨渠道、客戶名稱、收款狀況、備註、實收金額
+   * 每行品項一列；10+1 的贈品另起一列「特贈」。
+   * g: { store, orderNo, lines:[{product, qty, subtotal}] }
+   */
+  function ledgerRows(g, date, opts) {
+    opts = opts || {};
+    var rows = [];
+    g.lines.forEach(function (l) {
+      rows.push([date, '', '出庫', l.product, l.qty, opts.staff || '系統', opts.channel || 'B2B廠商', g.store, opts.pay || '',
+        '單據 ' + g.orderNo + (opts.batchId ? '／批次 ' + opts.batchId : ''), l.subtotal === '' || l.subtotal == null ? '' : Number(l.subtotal) || 0]);
+      var gift = giftQty(l.qty, l.product, opts.eligible);
+      if (gift > 0) rows.push([date, '', '出庫', l.product, gift, opts.staff || '系統', '特贈', g.store, '', '10+1 贈品／單據 ' + g.orderNo, '']);
+    });
+    return rows;
+  }
+
   /** 貨運單：每張工作表 6 格（2 頁 × 3 格），8 家 → [[6 家], [2 家]] → 3+3+2 頁 */
   function chunkLabels(stores) {
     var out = [];
@@ -334,6 +352,7 @@ var Core = (function () {
     giftQty: giftQty,
     buildNote: buildNote,
     buildGroups: buildGroups,
+    ledgerRows: ledgerRows,
     mergeSameProduct: mergeSameProduct,
     chunkLabels: chunkLabels,
     labelPagesFor: labelPagesFor,
@@ -364,10 +383,11 @@ if (typeof module !== 'undefined') module.exports = Core;
 var Parser = (function () {
   /** 預設型號對照（試算表「型號對照」可增修）。pin：4 / 8 表示同時指定 DCB-6000 的 pin 數 */
   var DEFAULT_ALIASES = [
-    ['GPB-2000A', 'GPB-2000A'], ['A款', 'GPB-2000A'],
-    ['GPB-2000S', 'GPB-2000S'], ['S款', 'GPB-2000S'],
+    ['GPB-2000A', 'GPB-2000A'], ['A款', 'GPB-2000A'], ['2000A', 'GPB-2000A'],
+    ['GPB-2000S', 'GPB-2000S'], ['S款', 'GPB-2000S'], ['2000S', 'GPB-2000S'],
     ['GPB-2000', 'GPB-2000'], ['GPB2000', 'GPB-2000'], ['一般的', 'GPB-2000'], ['2000', 'GPB-2000'],
-    ['DCB-6000', 'DCB-6000'], ['DCB6000', 'DCB-6000'], ['直流電力盒', 'DCB-6000'], ['電力盒', 'DCB-6000'],
+    ['DCB-6000', 'DCB-6000'], ['DCB6000', 'DCB-6000'], ['GPB-6000', 'DCB-6000'], ['6000', 'DCB-6000'],
+    ['直流電力盒', 'DCB-6000'], ['電力盒', 'DCB-6000'],
     ['直流', 'DCB-6000'], ['DC BOX', 'DCB-6000'], ['DCBOX', 'DCB-6000'],
     ['4PIN', 'DCB-6000', 4], ['8PIN', 'DCB-6000', 8],
     ['GPB-3600', 'GPB-3600'], ['方形小電池', 'GPB-3600'], ['方形', 'GPB-3600'], ['鉛酸', 'GPB-3600'],
@@ -390,7 +410,16 @@ var Parser = (function () {
   var MOD_ADD = /追加|多加|再加|加訂|另外再/;
   var MOD_CANCEL = /取消|不要了|先取消/;
   var WEEKDAY = { '一': 1, '二': 2, '三': 3, '四': 4, '五': 5, '六': 6, '日': 7, '天': 7 };
-  var VAGUE_DATE = /月底|月初|過幾天|改天|之後再|下週(?![一二三四五六日天])|下周(?![一二三四五六日天])|下禮拜(?![一二三四五六日天])|下星期(?![一二三四五六日天])/;  var NO_TOOL = /(不需|不用|不要|免)(要)?(帶)?(小電池)?工具(組)?/g;
+  var VAGUE_DATE = /月底|月初|過幾天|改天|之後再|下週(?![一二三四五六日天])|下周(?![一二三四五六日天])|下禮拜(?![一二三四五六日天])|下星期(?![一二三四五六日天])/;  var NO_TOOL = /(不需|不須|不用|不要|免|無須|無需)(要)?(帶)?(小電池)?工具(組)?/g;
+
+  var CN_DIGIT = { '零': 0, '〇': 0, '一': 1, '二': 2, '兩': 2, '两': 2, '三': 3, '四': 4, '五': 5, '六': 6, '七': 7, '八': 8, '九': 9 };
+  /** 中文數字（一～九十九、兩）轉阿拉伯數字；無法轉換回傳 NaN */
+  function cnNumber(s) {
+    if (/^[零〇一二兩两三四五六七八九]$/.test(s)) return CN_DIGIT[s];
+    var m = s.match(/^([一二兩两三四五六七八九])?十([一二三四五六七八九])?$/);
+    if (m) return (m[1] ? CN_DIGIT[m[1]] : 1) * 10 + (m[2] ? CN_DIGIT[m[2]] : 0);
+    return NaN;
+  }
 
   function normalize(text) {
     return String(text || '')
@@ -408,7 +437,7 @@ var Parser = (function () {
     var taken = [], hits = [];
     sorted.forEach(function (a) {
       var key = normalize(a.alias);
-      var re = new RegExp(/^\d+$/.test(key) ? '(?<![\\d\\-])' + escapeRe(key) + '(?![\\dA-Z])' : escapeRe(key), 'g');
+      var re = new RegExp(/^\d+$/.test(key) ? '(?<![\\d\\-$])' + escapeRe(key) + '(?![\\dA-Z元塊])' : escapeRe(key), 'g');
       var m;
       while ((m = re.exec(line))) {
         var s = m.index, e = s + m[0].length;
@@ -446,7 +475,12 @@ var Parser = (function () {
   function parse(text, opts) {
     opts = opts || {};
     var aliases = opts.aliases || DEFAULT_ALIASES;
-    var raw = normalize(text);
+    var raw = normalize(text)
+      // 「十顆」「兩顆」等中文數量 → 數字（只轉後面接單位的，避免「一店」被改掉）
+      .replace(/([零〇一二兩两三四五六七八九十]{1,3})\s*(顆|個|組|台|付|副|片|入|盒|PCS)/g, function (all, n, u) {
+        var v = cnNumber(n);
+        return isNaN(v) ? all : v + u;
+      });
     if (opts.today) {
       // 客戶在訊息開頭寫的當天日期只是抬頭，不算指定出貨日
       var t = opts.today.split('-').map(Number);
@@ -475,7 +509,7 @@ var Parser = (function () {
       hits.forEach(function (h) {
         var last = groups[groups.length - 1];
         if (last && last.product === 'DCB-6000' && h.product === 'DCB-6000' &&
-            /^[\s()]*$/.test(line.slice(last.end, h.start))) {
+            /^[\s()的]*$/.test(line.slice(last.end, h.start))) {
           last.end = h.end; if (h.pin) last.pin = h.pin;
         } else {
           groups.push({ start: h.start, end: h.end, product: h.product, pin: h.pin, pinOnly: h.pinOnly });
@@ -660,12 +694,82 @@ var Parser = (function () {
     return tie ? '' : best;
   }
 
+  /** 地址比對用：台/臺統一、去空白、去郵遞區號、只取到「號」 */
+  function addrKey(a) {
+    var s = normalize(a).replace(/臺/g, '台').replace(/\s+/g, '').replace(/^\d{3,6}/, '');
+    var i = s.indexOf('號');
+    return i >= 0 ? s.slice(0, i + 1) : s;
+  }
+
+  /** 地址的「路段＋門牌」部分，例：新北市中和區景平路319號 → 景平路319號 */
+  function streetKey(a) {
+    var k = addrKey(a);
+    var m = k.match(/^.*?[縣市].*?[區鄉鎮市](.+號)$/);
+    return m ? m[1] : (/號$/.test(k) ? k : '');
+  }
+
+  /**
+   * 從訊息判斷是哪一家店（多店帳號、群組下單用）：
+   * 1. 訊息中的地址（路段＋門牌）與廠商清冊送貨地址相同
+   * 2. 訊息中出現店名（完整或去掉「車業」等字尾）
+   * vendors：[{ name, address }]；candidates：只在這些店裡找（可省略）
+   * 只有唯一結果才回傳，否則回傳 ''。
+   */
+  function matchStore(text, vendors, candidates) {
+    var hay = normalize(text).replace(/臺/g, '台').replace(/\s+/g, '');
+    var pool = (vendors || []).filter(function (v) { return v && v.name && (!candidates || candidates.indexOf(v.name) >= 0); });
+    var byAddr = pool.filter(function (v) { var k = streetKey(v.address || ''); return k.length >= 5 && hay.indexOf(k) >= 0; });
+    if (byAddr.length === 1) return byAddr[0].name;
+    var names = pool.map(function (v) { return v.name; });
+    var byName = suggestVendor([text], byAddr.length > 1 ? byAddr.map(function (v) { return v.name; }) : names);
+    return byName || '';
+  }
+
+  /**
+   * 新客戶：從訊息抓店名、地址、電話、統編（抓不到留空，由客服補）
+   */
+  function extractContact(text) {
+    var raw = normalize(text).replace(/臺/g, '台');
+    var out = { storeName: '', address: '', phone: '', taxId: '', district: '' };
+    var ph = raw.match(/(?:^|[^\d])(09\d{2}[-\s]?\d{3}[-\s]?\d{3}|0\d{1,2}[-\s]?\d{3,4}[-\s]?\d{4})(?!\d)/);
+    if (ph) out.phone = ph[1].replace(/\s/g, '');
+    var tx = raw.match(/(?:統編|統一編號)[^\d]{0,4}(\d{8})(?!\d)/);
+    if (tx) out.taxId = tx[1];
+    var ad = raw.match(/(\d{3,6})?\s*([^\s,，。:：]{2,4}?[縣市][^\s,，。:：]{1,4}?[區鄉鎮市][^\s,，。:：]+?號(?:之\d+)?(?:\d+樓)?(?:之\d+)?)/);
+    if (ad) {
+      out.address = (ad[1] || '') + ad[2];
+      var dm = ad[2].match(/^(.{2,4}?[縣市].{1,4}?[區鄉鎮市])/);
+      if (dm) out.district = dm[1];
+    }
+    var lines = String(text || '').split(/[\n\r,，。]+/).map(function (l) { return l.trim(); }).filter(String);
+    for (var i = 0; i < lines.length; i++) {
+      // 同一行若含地址，先把地址拿掉再找店名
+      var l = normalize(lines[i]).replace(/臺/g, '台');
+      if (out.address) l = l.replace(out.address.replace(/^\d+/, ''), ' ');
+      if (/\d{2,}/.test(l) && !/店|車業|車行/.test(l)) continue;
+      var m = l.match(/([^\s，,。:：我們是的]{2,16}(?:車業行|車業|機車行|車行|電動車|電動機車|動能|電能|科技|企業社|商行|工作室|社區店|一店|二店|三店|分店|店))/);
+      if (m && !/需要|要訂|叫貨|訂貨/.test(m[1])) { out.storeName = m[1]; break; }
+    }
+    return out;
+  }
+
+  /** 新客戶預設價格組合：要工具 → B；不用工具但要發票 → D(稅外加)；其他 → A */
+  function newCustomerCombo(text, items, combos) {
+    combos = combos || {};
+    var raw = normalize(text);
+    var noTool = /(不需|不須|不用|不要|免|無須|無需)(要)?(帶)?(小電池)?工具/.test(raw);
+    var wantsTool = !noTool && ((items || []).some(function (it) { return it.product === '小電池工具組'; }) || /工具/.test(raw));
+    if (wantsTool) return combos.tool || 'B';
+    if (/統編|發票|收據/.test(raw)) return combos.invoice || 'D(稅外加)';
+    return combos.base || 'A';
+  }
+
   function unique(arr) { return arr.filter(function (x, i) { return arr.indexOf(x) === i; }); }
 
   /** 新版才加入的對照，舊的「型號對照」工作表會自動補上 */
-  var ADDED_ALIASES = ['小電池工具組', '工具組', '工具'];
+  var ADDED_ALIASES = ['小電池工具組', '工具組', '工具', '2000A', '2000S', 'GPB-6000', '6000'];
 
-  return { DEFAULT_ALIASES: DEFAULT_ALIASES, ADDED_ALIASES: ADDED_ALIASES, recentFor: recentFor, storeKey: storeKey, topProduct: topProduct, suggestVendor: suggestVendor, extractDate: extractDate, normalize: normalize, parse: parse, suggestFromHistory: suggestFromHistory };
+  return { DEFAULT_ALIASES: DEFAULT_ALIASES, ADDED_ALIASES: ADDED_ALIASES, recentFor: recentFor, storeKey: storeKey, topProduct: topProduct, suggestVendor: suggestVendor, extractDate: extractDate, matchStore: matchStore, addrKey: addrKey, extractContact: extractContact, newCustomerCombo: newCustomerCombo, normalize: normalize, parse: parse, suggestFromHistory: suggestFromHistory };
 })();
 
 if (typeof module !== 'undefined') module.exports = Parser;
@@ -818,6 +922,11 @@ var CONFIG_DEFAULTS = [
   ['強制合併時間', '15:50', '這個時間到當日截止之間，不等待、直接處理所有訊息'],
   ['接近截止提醒分鐘', 30, '截止前幾分鐘內下的單標成待確認'],
   ['待確認提醒時間', '15:30', '寄出待確認清單與「不是訂單」訊息清單'],
+  ['自動寫入庫存管理', true, '產單後把出庫（含 10+1 特贈）接在主檔「庫存管理」最後面，建檔人員為「系統」；不會修改既有資料'],
+  ['新客戶價格組合', 'A', '新客戶建檔草稿的預設價格組合'],
+  ['新客戶要工具價格組合', 'B', '新客戶第一張訂單要工具時'],
+  ['新客戶要發票價格組合', 'D(稅外加)', '新客戶不用工具但要統編發票時'],
+  ['本公司人員', '', '公司同事在 LINE 群組裡的名稱（逗號分隔），這些人在群組講的話不會當成訂單，例如：李宗光,Jessica Tsai'],
   ['AI判讀', false, '勾選後，規則判斷不了的訊息交給 Claude 判讀（需先設定金鑰）'],
   ['AI模型', 'claude-opus-5-5', '可改 claude-haiku-5-5（較便宜）'],
   ['AI思考強度', 'low', 'low / medium / high']
@@ -875,6 +984,10 @@ function tick() {
 /** 可安裝的 onEdit：勾選「產生補單」 */
 function onEditInstalled(e) {
   var r = e.range;
+  if (r.getSheet().getName() === NEW_SHEET && r.getColumn() <= NC['確認建檔'] + 1 && r.getLastColumn() >= NC['確認建檔'] + 1) {
+    handleNewCustomerEdit_(r);
+    return;
+  }
   if (r.getSheet().getName() === SHEET.ORDERS && r.getColumn() <= COL['確認'] + 1 && r.getLastColumn() >= COL['確認'] + 1) {
     handleConfirmEdit_(r);
     return;
@@ -959,8 +1072,13 @@ function runBatch_(type, opts) {
       Session.getEffectiveUser().getEmail(), url(lblXlsx)
     ]);
 
+    var ledgerNote = '';
+    if (truthy_(cfg['自動寫入庫存管理']) && mainIds_()[0]) {
+      try { ledgerNote = '<p>已寫入主檔「庫存管理」' + appendLedger_(built.groups, today, batchId, cfg) + ' 列（建檔人員：系統）。</p>'; }
+      catch (e) { ledgerNote = '<p>⚠ 寫入庫存管理失敗，請手動登記：' + esc_(e && e.message || e) + '</p>'; }
+    }
     notify_('【出貨】' + today + ' ' + type + ' ' + batchId + '：' + built.groups.length + ' 家店',
-      summaryHtml_(built, batchId, ss.getUrl()), attachments);
+      summaryHtml_(built, batchId, ss.getUrl()) + ledgerNote, attachments);
     return { ok: true, message: type + ' ' + batchId + ' 完成：' + built.groups.length + ' 家店' };
   } catch (err) {
     notify_('【出貨】產單失敗', '<p>' + type + ' 產單失敗，訂單狀態與單據編號都沒有變更。</p><pre>' + esc_(err && err.stack || err) + '</pre>', []);
@@ -1007,6 +1125,10 @@ function buildInvoices_(ss, groups, today, cfg, tmpSheets) {
     SpreadsheetApp.flush();
     freezeCrossSheet_(tmp, lastRow, tmp.getLastColumn()); // 含 N3 價格組合
     if (g.priceCombo) { tmp.getRange('N3').setValue(g.priceCombo); SpreadsheetApp.flush(); } // 這張單指定的價格組合（例如開發票）
+    // 記下各行小計與收款條件，產單成功後寫入庫存管理
+    var calc = tmp.getRange('C9:G15').getValues();
+    g.pay = tmp.getRange('E4').getDisplayValue();
+    g.lines.forEach(function (l, k) { l.subtotal = calc[k] ? calc[k][4] : ''; });
 
     var s = tmp.copyTo(out).setName((i + 1) + '_' + g.store);
     freezeAll_(s, page, lastCol);
@@ -1084,6 +1206,30 @@ function freezeAll_(sheet, page, lastCol) {
   var f = rng.getFormulas();
   if (!f.some(function (r) { return r.some(String); })) return;
   rng.setValues(rng.getValues());
+}
+
+/** 出庫紀錄接在主檔「庫存管理」最後一筆資料之後（只寫入空白列） */
+function appendLedger_(groups, today, batchId, cfg) {
+  var sh = SpreadsheetApp.openById(mainIds_()[0]).getSheetByName('庫存管理');
+  if (!sh) throw new Error('主檔找不到「庫存管理」');
+  var p = today.split('-').map(Number);
+  var date = new Date(p[0], p[1] - 1, p[2]);
+  var eligible = splitList_(cfg['10+1適用型號']);
+  var rows = [];
+  groups.forEach(function (g) {
+    rows = rows.concat(Core.ledgerRows({ store: g.store, orderNo: g.orderNo, lines: g.lines }, date, { eligible: eligible, pay: g.pay, batchId: batchId }));
+  });
+  if (!rows.length) return 0;
+  var data = sh.getRange(1, 1, sh.getLastRow(), 11).getValues();
+  var last = 0;
+  data.forEach(function (r, i) { if (String(r[0]).trim() || String(r[2]).trim() || String(r[3]).trim()) last = i + 1; });
+  var target = last + 1;
+  if (target + rows.length - 1 <= data.length) {
+    var busy = data.slice(target - 1, target - 1 + rows.length).some(function (r) { return r.some(function (v) { return String(v).trim() !== ''; }); });
+    if (busy) throw new Error('庫存管理第 ' + target + ' 列之後不是空白，為避免覆蓋資料已停止');
+  }
+  sh.getRange(target, 1, rows.length, 11).setValues(rows);
+  return rows.length;
 }
 
 /** 手打出貨單時：取號並記錄，避免與系統撞號 */
@@ -1290,10 +1436,17 @@ function markGenerated_(orders, groups, batchId) {
   });
 }
 
-function readVendorNames_() {
+/** 廠商清冊：只採用 A 欄有序號的店家（沒有序號的視為停用或重複資料） */
+function readVendorInfo_() {
   var sh = mustSheet_(SHEET.VENDORS);
-  return sh.getRange(2, 3, Math.max(sh.getLastRow() - 1, 1), 1).getValues()
-    .map(function (r) { return String(r[0]).trim(); }).filter(String);
+  if (sh.getLastRow() < 2) return [];
+  return sh.getRange(2, 1, sh.getLastRow() - 1, 6).getValues()
+    .filter(function (r) { return String(r[0]).trim() !== '' && !isNaN(Number(r[0])) && String(r[2]).trim(); })
+    .map(function (r) { return { no: Number(r[0]), name: String(r[2]).trim(), contact: String(r[3]).trim(), address: String(r[4]).trim(), phone: String(r[5]).trim() }; });
+}
+
+function readVendorNames_() {
+  return readVendorInfo_().map(function (v) { return v.name; });
 }
 
 function readCombos_() {
@@ -1489,7 +1642,7 @@ function setupCore_() {
   CONFIG_DEFAULTS.forEach(function (d) { if (existing.indexOf(d[0]) < 0) cfg.appendRow(d); });
   var keys = cfg.getRange(1, 1, cfg.getLastRow(), 1).getValues();
   keys.forEach(function (k, i) {
-    if ([SUPPLEMENT_KEY, '週六出貨', '試跑模式', 'AI判讀', '輸出Excel', '輸出PDF', '貨運單粗體'].indexOf(k[0]) >= 0) cfg.getRange(i + 1, 2).insertCheckboxes();
+    if ([SUPPLEMENT_KEY, '週六出貨', '試跑模式', 'AI判讀', '輸出Excel', '輸出PDF', '貨運單粗體', '自動寫入庫存管理'].indexOf(k[0]) >= 0) cfg.getRange(i + 1, 2).insertCheckboxes();
     if (k[0] === '單據編號月份' || String(k[0]).indexOf('時間') >= 0) cfg.getRange(i + 1, 2).setNumberFormat('@');
   });
 
@@ -1532,7 +1685,9 @@ function setupCore_() {
   pt.getRange(2, 3, pt.getMaxRows() - 1, 1).insertCheckboxes();
   pt.getRange(2, 1, pt.getMaxRows() - 1, 8).setWrap(true).setVerticalAlignment('top');
   ensureSheet_(SHEET.HOLIDAYS, ['日期', '說明']);
-  ensureSheet_(LINE_SHEET.LOG, LOG_HEADERS).setFrozenRows(1);
+  var lg = ensureSheet_(LINE_SHEET.LOG, LOG_HEADERS);
+  lg.getRange(1, 1, 1, LOG_HEADERS.length).setValues([LOG_HEADERS]).setFontWeight('bold');
+  lg.setFrozenRows(1);
   var trial = ensureSheet_(LINE_SHEET.TRIAL, ORDER_HEADERS);
   trial.setFrozenRows(1);
   trial.getRange(2, COL['出貨日'] + 1, trial.getMaxRows() - 1, 1).setNumberFormat('yyyy-mm-dd');
@@ -1620,9 +1775,10 @@ function showResult_(res) {
  */
 
 var LINE_SHEET = { LOG: '訊息紀錄', BIND: 'LINE帳號對照', TRIAL: 'LINE試跑' };
-var LOG_HEADERS = ['收到時間', '事件ID', 'LINE使用者ID', '類型', '內容', '訊息ID', '狀態', '段落ID', '判斷'];
-var BIND_HEADERS = ['LINE使用者ID', 'LINE名稱', '店家', '第一次出現', '備註', '系統建議店家'];
+var LOG_HEADERS = ['收到時間', '事件ID', '對話ID（個人或群組）', '類型', '內容', '訊息ID', '狀態', '段落ID', '判斷', '發話者ID', '發話者名稱'];
+var BIND_HEADERS = ['LINE對話ID（個人或群組）', 'LINE名稱', '店家', '第一次出現', '備註', '系統建議店家'];
 var LOG_COL = {}; LOG_HEADERS.forEach(function (h, i) { LOG_COL[h] = i; });
+LOG_COL['LINE使用者ID'] = LOG_COL['對話ID（個人或群組）']; // 舊名稱相容
 
 /* ───────────── 接收 ───────────── */
 
@@ -1644,34 +1800,80 @@ function text_(s) { return ContentService.createTextOutput(s); }
 function storeEvents_(events) {
   var cache = CacheService.getScriptCache();
   var log = ensureSheet_(LINE_SHEET.LOG, LOG_HEADERS);
+  var staff = null;
   events.forEach(function (ev) {
-    if (ev.type !== 'message' || !ev.source || ev.source.type !== 'user') return;
+    var src = ev.source || {};
+    if (ev.type !== 'message' || ['user', 'group', 'room'].indexOf(src.type) < 0) return;
     var id = ev.webhookEventId || (ev.message && ev.message.id);
     if (cache.get('ev:' + id)) return; // LINE 重送的同一事件
     cache.put('ev:' + id, '1', 21600);
     var m = ev.message;
     var content = m.type === 'text' ? m.text : ({ image: '[圖片]', sticker: '[貼圖]', video: '[影片]', audio: '[語音]', file: '[檔案]', location: '[位置]' }[m.type] || '[' + m.type + ']');
-    log.appendRow([new Date(ev.timestamp), id, ev.source.userId, m.type, content, m.id, '未處理', '', '']);
-    ensureBinding_(ev.source.userId, m.type === 'text' ? m.text : '');
+    var chat = src.groupId || src.roomId || src.userId;
+    var sender = src.userId || '';
+    var senderName = '', status = '未處理';
+    if (src.type !== 'user') {
+      // 群組：記下是誰說的；公司同事在群組講的話不當成訂單
+      senderName = sender ? lineMemberName_(src, sender) : '';
+      staff = staff || splitList_(readConfig_()['本公司人員']);
+      if (senderName && staff.some(function (n) { return senderName.indexOf(n) >= 0; })) status = '本公司';
+    }
+    log.appendRow([new Date(ev.timestamp), id, chat, m.type, content, m.id, status, '', status === '本公司' ? '本公司人員' : '', sender, senderName]);
+    if (status === '未處理') ensureBinding_(chat, m.type === 'text' ? m.text : '', src);
   });
 }
 
-function ensureBinding_(userId, text) {
+/** 個人帳號、群組各一列；同一個對話可以有多列＝綁多家店 */
+function ensureBinding_(chatId, text, src) {
   var sh = ensureSheet_(LINE_SHEET.BIND, BIND_HEADERS);
   if (sh.getLastRow() > 1) {
     var rows = sh.getRange(2, 1, sh.getLastRow() - 1, 6).getValues();
-    for (var i = 0; i < rows.length; i++) {
-      if (rows[i][0] !== userId) continue;
+    var mine = [];
+    rows.forEach(function (r, i) { if (r[0] === chatId) mine.push(i); });
+    if (mine.length) {
       // 還沒綁定、也還沒有建議：用新訊息再試一次
-      if (!String(rows[i][2]).trim() && !String(rows[i][5]).trim() && text) {
-        var sug = Parser.suggestVendor([rows[i][1], text], readVendorNames_());
-        if (sug) sh.getRange(i + 2, 6).setValue(sug);
+      var i0 = mine[0];
+      if (mine.length === 1 && !String(rows[i0][2]).trim() && !String(rows[i0][5]).trim() && text) {
+        var sug = guessStore_([rows[i0][1], text].join(' '));
+        if (sug) sh.getRange(i0 + 2, 6).setValue(sug);
       }
       return;
     }
   }
-  var name = lineProfileName_(userId);
-  sh.appendRow([userId, name, '', new Date(), '', Parser.suggestVendor([name, text], readVendorNames_())]);
+  var name = src && src.type === 'group' ? '群組：' + lineGroupName_(src.groupId) :
+    src && src.type === 'room' ? '多人聊天' : lineProfileName_(chatId);
+  sh.appendRow([chatId, name, '', new Date(), '', guessStore_([name, text].join(' '))]);
+}
+
+/** 用店名或地址從廠商清冊猜是哪家店 */
+function guessStore_(text) {
+  return Parser.matchStore(text, readVendorInfo_()) || '';
+}
+
+function lineGroupName_(groupId) {
+  var token = PropertiesService.getScriptProperties().getProperty('LINE_TOKEN');
+  if (!token) return '';
+  var res = UrlFetchApp.fetch('https://api.line.me/v2/bot/group/' + encodeURIComponent(groupId) + '/summary', {
+    headers: { Authorization: 'Bearer ' + token }, muteHttpExceptions: true
+  });
+  return res.getResponseCode() === 200 ? JSON.parse(res.getContentText()).groupName : '';
+}
+
+/** 群組成員名稱（快取 6 小時） */
+function lineMemberName_(src, userId) {
+  var cache = CacheService.getScriptCache();
+  var key = 'mem:' + userId;
+  var hit = cache.get(key);
+  if (hit) return hit;
+  var token = PropertiesService.getScriptProperties().getProperty('LINE_TOKEN');
+  if (!token) return '';
+  var path = src.type === 'group' ? 'group/' + encodeURIComponent(src.groupId) : 'room/' + encodeURIComponent(src.roomId);
+  var res = UrlFetchApp.fetch('https://api.line.me/v2/bot/' + path + '/member/' + encodeURIComponent(userId), {
+    headers: { Authorization: 'Bearer ' + token }, muteHttpExceptions: true
+  });
+  var name = res.getResponseCode() === 200 ? JSON.parse(res.getContentText()).displayName : '';
+  if (name) cache.put(key, name, 21600);
+  return name;
 }
 
 function lineProfileName_(userId) {
@@ -1707,9 +1909,12 @@ function processLine_(force) {
     var eid = r[LOG_COL['事件ID']];
     if (seen[eid]) { log.getRange(i + 2, LOG_COL['狀態'] + 1).setValue('重複'); return; }
     seen[eid] = true;
+    var chat = r[LOG_COL['對話ID（個人或群組）']], sender = r[LOG_COL['發話者ID']] || '';
+    var isGroup = /^[CR]/.test(String(chat)); // 群組 ID 以 C 開頭、多人聊天以 R 開頭
     msgs.push({
-      row: i + 2, ts: new Date(r[LOG_COL['收到時間']]).getTime(), userId: r[LOG_COL['LINE使用者ID']],
-      type: r[LOG_COL['類型']], text: String(r[LOG_COL['內容']]), messageId: r[LOG_COL['訊息ID']]
+      row: i + 2, ts: new Date(r[LOG_COL['收到時間']]).getTime(),
+      userId: isGroup && sender ? chat + '|' + sender : chat, // 合併訊息的單位：個人；群組裡依發話者分開
+      chat: chat, type: r[LOG_COL['類型']], text: String(r[LOG_COL['內容']]), messageId: r[LOG_COL['訊息ID']]
     });
   });
   if (!msgs.length) { notifyUnbound_(); return '沒有待處理的訊息'; }
@@ -1719,7 +1924,7 @@ function processLine_(force) {
   var segs = Core.readySegments(msgs, Date.now(), (Number(cfg['合併等待分鐘']) || 10) * 60000, forceNow);
   var ctx = {
     cfg: cfg, aliases: readAliases_(), products: unique_(readProducts_()), holidays: readHolidays_(),
-    bindings: readBindings_(), history: null, today: fmtDate_(new Date())
+    bindings: readBindings_(), vendorInfo: readVendorInfo_(), history: null, today: fmtDate_(new Date())
   };
   var counts = { order: 0, unclear: 0, not_order: 0 };
   segs.forEach(function (seg) {
@@ -1748,9 +1953,18 @@ function handleSegment_(seg, ctx, log) {
   };
   if (res.kind === 'not_order') { mark('非訂單'); return 'not_order'; }
 
-  var bound = ctx.bindings[seg.userId] || '';
+  var chat = seg.msgs[0].chat || seg.userId;
+  var vendorNames = ctx.vendors || (ctx.vendors = readVendorNames_());
   // 廠商清冊改名（例如加上「(午後收貨)」）後仍對得上
-  var store = bound ? (Core.resolveVendor(bound, ctx.vendors || (ctx.vendors = readVendorNames_())) || bound) : '';
+  var bound = (ctx.bindings[chat] || []).map(function (b) { return Core.resolveVendor(b, vendorNames) || b; });
+  var store = '', storeNote = '';
+  if (bound.length === 1) {
+    store = bound[0];
+  } else if (bound.length > 1) {
+    // 多店帳號／群組：從訊息裡的分店名或地址判斷
+    store = Parser.matchStore(text, ctx.vendorInfo, bound);
+    if (!store) storeNote = '這個帳號／群組綁了多家店（' + bound.join('、') + '），訊息沒寫是哪一家，請選擇店家';
+  }
   var items = res.items.slice(), reasons = res.reasons.slice(), notes = res.notes.slice();
   var kind = res.kind;
 
@@ -1777,9 +1991,11 @@ function handleSegment_(seg, ctx, log) {
       reasons.push('品項由 AI 判讀，請核對');
     }
   }
-  if (!store) {
-    var hint = Parser.suggestVendor([text], ctx.vendors || (ctx.vendors = readVendorNames_()));
-    reasons.push('LINE 帳號尚未綁定店家，請到「LINE帳號對照」選擇店家' + (hint ? '（系統建議：' + hint + '）' : '（廠商清冊找不到相符店名，可能是新客戶，請先在主檔建檔）'));
+  if (storeNote) reasons.push(storeNote);
+  else if (!store) {
+    var hint = Parser.matchStore(text, ctx.vendorInfo);
+    reasons.push('LINE 帳號尚未綁定店家，請到「LINE帳號對照」選擇店家' + (hint ? '（系統建議：' + hint + '）' : '（廠商清冊找不到相符店名或地址，可能是新客戶，已建立「新客戶待建檔」草稿）'));
+    if (!hint) draftNewCustomer_(chat, text, res, items);
   }
 
   var ship = Core.inferShipDate(recvDate, recvHm, {
@@ -1876,13 +2092,27 @@ function readBindings_() {
   var map = {};
   if (sh.getLastRow() < 2) return map;
   sh.getRange(2, 1, sh.getLastRow() - 1, 3).getValues().forEach(function (r) {
-    if (r[0] && String(r[2]).trim()) map[r[0]] = String(r[2]).trim();
+    var st = String(r[2]).trim();
+    if (!r[0] || !st) return;
+    map[r[0]] = map[r[0]] || [];
+    if (map[r[0]].indexOf(st) < 0) map[r[0]].push(st);
   });
   return map;
 }
 
 /** 綁定店家後，把這個帳號尚未填店家的訂單列補上 */
 function applyBinding_(userId, store) {
+  // 直接綁定舊客戶時，這個對話的新客戶草稿就不需要了
+  var draft = SpreadsheetApp.getActive().getSheetByName(NEW_SHEET);
+  if (draft && draft.getLastRow() > 1) {
+    draft.getRange(2, 1, draft.getLastRow() - 1, NEW_HEADERS.length).getValues().forEach(function (r, i) {
+      if (r[NC['LINE對話ID']] === userId && String(r[NC['狀態']]).indexOf('已建檔') !== 0) {
+        draft.getRange(i + 2, NC['狀態'] + 1).setValue('已綁定既有店家「' + store + '」，不需建檔');
+      }
+    });
+  }
+  var all = readBindings_()[userId] || [];
+  if (all.length > 1) return; // 多店帳號：每筆訂單的店家要個別確認，不自動補
   [SHEET.ORDERS, LINE_SHEET.TRIAL].forEach(function (name) {
     var sh = SpreadsheetApp.getActive().getSheetByName(name);
     if (!sh || sh.getLastRow() < 2) return;
@@ -2116,6 +2346,167 @@ function unique_(arr) { return arr.filter(function (x, i) { return x !== '' && a
 
 
 /**
+ * 新客戶自動建檔（需人工確認）
+ * 1. 未綁定、廠商清冊找不到相符店名或地址的 LINE 對話 → 自動建立草稿（店名、地址、電話、統編、預設價格組合）
+ * 2. 客服補齊、選好收款條件與價格組合後勾「確認建檔」
+ * 3. 系統把這家店「接在主檔廠商清冊最後一列之後」新增（不修改任何既有資料），同步並綁定 LINE
+ * 綁定前收到的訂單一律是「待確認」，要客服確認後才會產單。
+ */
+
+var NEW_SHEET = '新客戶待建檔';
+var NEW_HEADERS = ['LINE對話ID', 'LINE名稱', '店名', '聯絡人', '送貨地址', '電話', '統編', '店家區域', '價格組合', '收款條件',
+  '發票樣式', '第一則訊息', '建立時間', '確認建檔', '狀態'];
+var NC = {}; NEW_HEADERS.forEach(function (h, i) { NC[h] = i; });
+
+/** 建立或補齊草稿（同一個 LINE 對話只有一份） */
+function draftNewCustomer_(chatId, text, res, items) {
+  var sh = ensureSheet_(NEW_SHEET, NEW_HEADERS);
+  var info = Parser.extractContact(text);
+  var cfg = readConfig_();
+  var combo = Parser.newCustomerCombo(text, items, {
+    base: cfg['新客戶價格組合'], tool: cfg['新客戶要工具價格組合'], invoice: cfg['新客戶要發票價格組合']
+  });
+  var n = sh.getLastRow() - 1;
+  var rows = n > 0 ? sh.getRange(2, 1, n, NEW_HEADERS.length).getValues() : [];
+  for (var i = 0; i < rows.length; i++) {
+    if (rows[i][NC['LINE對話ID']] !== chatId || String(rows[i][NC['狀態']]).indexOf('已建檔') === 0) continue;
+    // 已有草稿：只補空白欄位，不覆蓋客服填的內容
+    var r = rows[i];
+    var fill = { '店名': info.storeName, '送貨地址': info.address, '電話': info.phone, '統編': info.taxId, '店家區域': info.district };
+    Object.keys(fill).forEach(function (k) {
+      if (!String(r[NC[k]]).trim() && fill[k]) sh.getRange(i + 2, NC[k] + 1).setValue(fill[k]);
+    });
+    return;
+  }
+  var lineName = bindingName_(chatId);
+  var row = NEW_HEADERS.map(function () { return ''; });
+  row[NC['LINE對話ID']] = chatId;
+  row[NC['LINE名稱']] = lineName;
+  row[NC['店名']] = info.storeName;
+  row[NC['聯絡人']] = String(lineName).split(/[\/／]/).pop().trim();
+  row[NC['送貨地址']] = info.address;
+  row[NC['電話']] = info.phone;
+  row[NC['統編']] = info.taxId;
+  row[NC['店家區域']] = info.district;
+  row[NC['價格組合']] = combo;
+  row[NC['第一則訊息']] = String(text).slice(0, 300);
+  row[NC['建立時間']] = new Date();
+  row[NC['確認建檔']] = false;
+  row[NC['狀態']] = '待補資料';
+  sh.appendRow(row);
+  formatNewCustomerSheet_(sh);
+  notify_('【出貨】新客戶待建檔：' + (info.storeName || lineName || '未知店名'),
+    '<p>有一個 LINE 對話找不到對應的店家，系統已在「' + NEW_SHEET + '」建立草稿：</p><ul>' +
+    '<li>店名：' + esc_(info.storeName || '（未抓到，請補）') + '</li><li>地址：' + esc_(info.address || '（未抓到，請補）') + '</li>' +
+    '<li>電話：' + esc_(info.phone || '（未抓到，請補）') + '</li><li>預設價格組合：' + esc_(combo) + '</li></ul>' +
+    '<p>請補齊資料、選擇收款條件，確認無誤後勾「確認建檔」，系統會新增到主檔廠商清冊（只新增一列，不會改到其他資料）並綁定這個 LINE。</p>' +
+    '<p><a href="' + SpreadsheetApp.getActive().getUrl() + '">開啟華暉出貨自動化</a></p>', []);
+}
+
+function bindingName_(chatId) {
+  var sh = SpreadsheetApp.getActive().getSheetByName(LINE_SHEET.BIND);
+  if (!sh || sh.getLastRow() < 2) return '';
+  var rows = sh.getRange(2, 1, sh.getLastRow() - 1, 2).getValues();
+  for (var i = 0; i < rows.length; i++) if (rows[i][0] === chatId) return String(rows[i][1]);
+  return '';
+}
+
+/** 勾選「確認建檔」 */
+function handleNewCustomerEdit_(range) {
+  var sh = range.getSheet();
+  for (var r = range.getRow(); r < range.getRow() + range.getNumRows(); r++) {
+    if (r < 2) continue;
+    var box = sh.getRange(r, NC['確認建檔'] + 1);
+    if (box.getValue() !== true) continue;
+    var msg;
+    try { msg = confirmNewCustomer_(sh, r); }
+    catch (e) { msg = '❌ ' + (e && e.message || e); }
+    box.setValue(false);
+    sh.getRange(r, NC['狀態'] + 1).setValue(msg);
+  }
+}
+
+function confirmNewCustomer_(sh, r) {
+  var row = sh.getRange(r, 1, 1, NEW_HEADERS.length).getValues()[0];
+  if (String(row[NC['狀態']]).indexOf('已建檔') === 0) return row[NC['狀態']];
+  var need = ['店名', '送貨地址', '電話', '價格組合', '收款條件'].filter(function (k) { return !String(row[NC[k]]).trim(); });
+  if (need.length) throw new Error('還缺：' + need.join('、'));
+  var name = String(row[NC['店名']]).trim();
+  var exists = readVendorNames_().filter(function (v) { return Core.storeKey(v) === Core.storeKey(name); });
+  if (exists.length) throw new Error('廠商清冊已有「' + exists[0] + '」，請改用「LINE帳號對照」直接選店家');
+  var mainId = mainIds_()[0];
+  if (!mainId) throw new Error('請先在「設定」填入主檔試算表ID');
+
+  var lock = LockService.getScriptLock();
+  lock.waitLock(30000);
+  try {
+    var vsh = SpreadsheetApp.openById(mainId).getSheetByName(SHEET.VENDORS);
+    if (!vsh) throw new Error('主檔找不到「廠商清冊」');
+    // 找最後一個有店名的列，新店家接在它下一列（只寫入空白列，不覆蓋任何資料）
+    var last = vsh.getLastRow();
+    var cols = vsh.getRange(1, 1, last, 3).getValues();
+    var lastIdx = 0, maxNo = 0;
+    cols.forEach(function (c, i) {
+      if (String(c[2]).trim()) lastIdx = i + 1;
+      if (i > 0 && !isNaN(Number(c[0])) && String(c[0]).trim() !== '') maxNo = Math.max(maxNo, Number(c[0]));
+    });
+    var target = lastIdx + 1;
+    if (target <= last && vsh.getRange(target, 1, 1, 18).getValues()[0].some(function (v) { return String(v).trim() !== ''; })) {
+      throw new Error('主檔廠商清冊第 ' + target + ' 列不是空白，為避免覆蓋資料已停止，請檢查主檔');
+    }
+    var today = new Date();
+    vsh.getRange(target, 1, 1, 6).setValues([[maxNo + 1, today, name, row[NC['聯絡人']], row[NC['送貨地址']], row[NC['電話']]]]);
+    vsh.getRange(target, 7, 1, 3).setValues([[0, 0, 0]]);
+    // 累計叫貨量等公式：沿用上一列的寫法
+    if (lastIdx >= 2) {
+      var f = vsh.getRange(lastIdx, 10, 1, 2).getFormulasR1C1()[0];
+      if (f[0] || f[1]) vsh.getRange(target, 10, 1, 2).setFormulasR1C1([f]);
+    }
+    vsh.getRange(target, 14, 1, 5).setValues([[row[NC['統編']], row[NC['店家區域']], row[NC['收款條件']], row[NC['價格組合']], row[NC['發票樣式']]]]);
+  } finally {
+    lock.releaseLock();
+  }
+
+  syncVendors();
+  bindChat_(row[NC['LINE對話ID']], row[NC['LINE名稱']], name);
+  return '已建檔 ' + Utilities.formatDate(new Date(), TZ, 'MM/dd HH:mm') + '（主檔第 ' + target + ' 列），已綁定 LINE；這個客戶的訂單請到出貨清單核對後勾「確認」';
+}
+
+/** 綁定：已有空白列就填入，否則新增一列；並補上之前訂單的店家 */
+function bindChat_(chatId, lineName, store) {
+  var sh = ensureSheet_(LINE_SHEET.BIND, BIND_HEADERS);
+  var n = sh.getLastRow() - 1;
+  var rows = n > 0 ? sh.getRange(2, 1, n, 3).getValues() : [];
+  var done = false;
+  for (var i = 0; i < rows.length; i++) {
+    if (rows[i][0] === chatId && !String(rows[i][2]).trim()) { sh.getRange(i + 2, 3).setValue(store); done = true; break; }
+  }
+  if (!done) sh.appendRow([chatId, lineName, store, new Date(), '新客戶建檔', '']);
+  applyBinding_(chatId, store);
+}
+
+function formatNewCustomerSheet_(sh) {
+  sh = sh || ensureSheet_(NEW_SHEET, NEW_HEADERS);
+  headerStyle_(sh, NEW_HEADERS.length);
+  var rows = sh.getMaxRows() - 1;
+  var widths = [60, 160, 170, 90, 260, 120, 90, 120, 110, 100, 100, 320, 120, 80, 260];
+  widths.forEach(function (w, i) { sh.setColumnWidth(i + 1, w); });
+  sh.hideColumns(1);
+  sh.getRange(2, NC['確認建檔'] + 1, rows, 1).insertCheckboxes();
+  sh.getRange(2, NC['第一則訊息'] + 1, rows, 1).setWrap(true);
+  sh.getRange(2, NC['建立時間'] + 1, rows, 1).setNumberFormat('mm/dd hh:mm');
+  var ss = SpreadsheetApp.getActive();
+  sh.getRange(2, NC['價格組合'] + 1, rows, 1).setDataValidation(SpreadsheetApp.newDataValidation()
+    .requireValueInRange(ss.getSheetByName(SHEET.INVOICE).getRange('O3:O103'), true).setAllowInvalid(false).build());
+  var pays = unique_(ss.getSheetByName(SHEET.VENDORS).getRange('P2:P').getValues().map(function (x) { return String(x[0]).trim(); })).filter(String);
+  if (pays.length) sh.getRange(2, NC['收款條件'] + 1, rows, 1).setDataValidation(SpreadsheetApp.newDataValidation()
+    .requireValueInList(pays, true).setAllowInvalid(true).build());
+  ['店名', '送貨地址', '電話', '價格組合', '收款條件'].forEach(function (k) { sh.getRange(1, NC[k] + 1).setBackground('#a3620a'); });
+  sh.getRange(1, NC['確認建檔'] + 1).setNote('深色標題是必填。勾選後新增到主檔廠商清冊並綁定 LINE（只新增一列，不改其他資料）');
+}
+
+
+/**
  * 表格外觀與操作：狀態顏色、隱藏技術欄位、「確認」勾選、總覽頁。
  * 只改外觀與輔助功能，不影響資料欄位的位置。
  */
@@ -2164,6 +2555,7 @@ function formatSheets_() {
     sh.getRange(2, 3, sh.getMaxRows() - 1, 1).setDataValidation(SpreadsheetApp.newDataValidation()
       .requireValueInList(['4', '8'], true).setAllowInvalid(true).build());
   });
+  step('新客戶待建檔', function () { formatNewCustomerSheet_(ensureSheet_(NEW_SHEET, NEW_HEADERS)); });
   step('訊息紀錄', function () { formatSimple_(ss.getSheetByName(LINE_SHEET.LOG), { 1: 150, 2: 60, 3: 60, 4: 70, 5: 440, 6: 60, 7: 90, 8: 60, 9: 110 }, [2, 3, 6, 8]); });
   step('批次紀錄', function () { formatSimple_(ss.getSheetByName(SHEET.BATCHES), { 1: 120, 2: 150, 3: 80, 4: 80, 5: 280, 6: 130, 7: 130, 8: 130, 9: 170, 10: 130 }, []); });
   step('設定', function () { formatConfig_(ss.getSheetByName(SHEET.CONFIG)); });
@@ -2287,10 +2679,10 @@ function buildOverview_() {
 /** 分頁順序：常用在前，模板與紀錄在後並標灰 */
 function arrangeTabs_() {
   var ss = SpreadsheetApp.getActive();
-  var order = ['總覽', SHEET.ORDERS, LINE_SHEET.TRIAL, LINE_SHEET.BIND, SHEET.CONFIG, SHEET.ALIASES, SHEET.HOLIDAYS, SHEET.PARSE_TEST,
+  var order = ['總覽', SHEET.ORDERS, LINE_SHEET.TRIAL, LINE_SHEET.BIND, NEW_SHEET, SHEET.CONFIG, SHEET.ALIASES, SHEET.HOLIDAYS, SHEET.PARSE_TEST,
     LINE_SHEET.LOG, SHEET.BATCHES, SHEET.INVOICE, SHEET.LABEL, SHEET.VENDORS];
   var colors = {};
-  colors[SHEET.ORDERS] = '#2f7d4f'; colors[LINE_SHEET.TRIAL] = '#7fa8ee'; colors[LINE_SHEET.BIND] = '#f6c453';
+  colors[SHEET.ORDERS] = '#2f7d4f'; colors[LINE_SHEET.TRIAL] = '#7fa8ee'; colors[LINE_SHEET.BIND] = '#f6c453'; colors[NEW_SHEET] = '#a3620a';
   [LINE_SHEET.LOG, SHEET.BATCHES, SHEET.INVOICE, SHEET.LABEL, SHEET.VENDORS].forEach(function (n) { colors[n] = '#9aa3af'; });
   var pos = 1;
   order.forEach(function (name) {

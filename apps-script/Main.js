@@ -58,6 +58,11 @@ var CONFIG_DEFAULTS = [
   ['強制合併時間', '15:50', '這個時間到當日截止之間，不等待、直接處理所有訊息'],
   ['接近截止提醒分鐘', 30, '截止前幾分鐘內下的單標成待確認'],
   ['待確認提醒時間', '15:30', '寄出待確認清單與「不是訂單」訊息清單'],
+  ['自動寫入庫存管理', true, '產單後把出庫（含 10+1 特贈）接在主檔「庫存管理」最後面，建檔人員為「系統」；不會修改既有資料'],
+  ['新客戶價格組合', 'A', '新客戶建檔草稿的預設價格組合'],
+  ['新客戶要工具價格組合', 'B', '新客戶第一張訂單要工具時'],
+  ['新客戶要發票價格組合', 'D(稅外加)', '新客戶不用工具但要統編發票時'],
+  ['本公司人員', '', '公司同事在 LINE 群組裡的名稱（逗號分隔），這些人在群組講的話不會當成訂單，例如：李宗光,Jessica Tsai'],
   ['AI判讀', false, '勾選後，規則判斷不了的訊息交給 Claude 判讀（需先設定金鑰）'],
   ['AI模型', 'claude-opus-5-5', '可改 claude-haiku-5-5（較便宜）'],
   ['AI思考強度', 'low', 'low / medium / high']
@@ -115,6 +120,10 @@ function tick() {
 /** 可安裝的 onEdit：勾選「產生補單」 */
 function onEditInstalled(e) {
   var r = e.range;
+  if (r.getSheet().getName() === NEW_SHEET && r.getColumn() <= NC['確認建檔'] + 1 && r.getLastColumn() >= NC['確認建檔'] + 1) {
+    handleNewCustomerEdit_(r);
+    return;
+  }
   if (r.getSheet().getName() === SHEET.ORDERS && r.getColumn() <= COL['確認'] + 1 && r.getLastColumn() >= COL['確認'] + 1) {
     handleConfirmEdit_(r);
     return;
@@ -199,8 +208,13 @@ function runBatch_(type, opts) {
       Session.getEffectiveUser().getEmail(), url(lblXlsx)
     ]);
 
+    var ledgerNote = '';
+    if (truthy_(cfg['自動寫入庫存管理']) && mainIds_()[0]) {
+      try { ledgerNote = '<p>已寫入主檔「庫存管理」' + appendLedger_(built.groups, today, batchId, cfg) + ' 列（建檔人員：系統）。</p>'; }
+      catch (e) { ledgerNote = '<p>⚠ 寫入庫存管理失敗，請手動登記：' + esc_(e && e.message || e) + '</p>'; }
+    }
     notify_('【出貨】' + today + ' ' + type + ' ' + batchId + '：' + built.groups.length + ' 家店',
-      summaryHtml_(built, batchId, ss.getUrl()), attachments);
+      summaryHtml_(built, batchId, ss.getUrl()) + ledgerNote, attachments);
     return { ok: true, message: type + ' ' + batchId + ' 完成：' + built.groups.length + ' 家店' };
   } catch (err) {
     notify_('【出貨】產單失敗', '<p>' + type + ' 產單失敗，訂單狀態與單據編號都沒有變更。</p><pre>' + esc_(err && err.stack || err) + '</pre>', []);
@@ -247,6 +261,10 @@ function buildInvoices_(ss, groups, today, cfg, tmpSheets) {
     SpreadsheetApp.flush();
     freezeCrossSheet_(tmp, lastRow, tmp.getLastColumn()); // 含 N3 價格組合
     if (g.priceCombo) { tmp.getRange('N3').setValue(g.priceCombo); SpreadsheetApp.flush(); } // 這張單指定的價格組合（例如開發票）
+    // 記下各行小計與收款條件，產單成功後寫入庫存管理
+    var calc = tmp.getRange('C9:G15').getValues();
+    g.pay = tmp.getRange('E4').getDisplayValue();
+    g.lines.forEach(function (l, k) { l.subtotal = calc[k] ? calc[k][4] : ''; });
 
     var s = tmp.copyTo(out).setName((i + 1) + '_' + g.store);
     freezeAll_(s, page, lastCol);
@@ -324,6 +342,30 @@ function freezeAll_(sheet, page, lastCol) {
   var f = rng.getFormulas();
   if (!f.some(function (r) { return r.some(String); })) return;
   rng.setValues(rng.getValues());
+}
+
+/** 出庫紀錄接在主檔「庫存管理」最後一筆資料之後（只寫入空白列） */
+function appendLedger_(groups, today, batchId, cfg) {
+  var sh = SpreadsheetApp.openById(mainIds_()[0]).getSheetByName('庫存管理');
+  if (!sh) throw new Error('主檔找不到「庫存管理」');
+  var p = today.split('-').map(Number);
+  var date = new Date(p[0], p[1] - 1, p[2]);
+  var eligible = splitList_(cfg['10+1適用型號']);
+  var rows = [];
+  groups.forEach(function (g) {
+    rows = rows.concat(Core.ledgerRows({ store: g.store, orderNo: g.orderNo, lines: g.lines }, date, { eligible: eligible, pay: g.pay, batchId: batchId }));
+  });
+  if (!rows.length) return 0;
+  var data = sh.getRange(1, 1, sh.getLastRow(), 11).getValues();
+  var last = 0;
+  data.forEach(function (r, i) { if (String(r[0]).trim() || String(r[2]).trim() || String(r[3]).trim()) last = i + 1; });
+  var target = last + 1;
+  if (target + rows.length - 1 <= data.length) {
+    var busy = data.slice(target - 1, target - 1 + rows.length).some(function (r) { return r.some(function (v) { return String(v).trim() !== ''; }); });
+    if (busy) throw new Error('庫存管理第 ' + target + ' 列之後不是空白，為避免覆蓋資料已停止');
+  }
+  sh.getRange(target, 1, rows.length, 11).setValues(rows);
+  return rows.length;
 }
 
 /** 手打出貨單時：取號並記錄，避免與系統撞號 */
@@ -530,10 +572,17 @@ function markGenerated_(orders, groups, batchId) {
   });
 }
 
-function readVendorNames_() {
+/** 廠商清冊：只採用 A 欄有序號的店家（沒有序號的視為停用或重複資料） */
+function readVendorInfo_() {
   var sh = mustSheet_(SHEET.VENDORS);
-  return sh.getRange(2, 3, Math.max(sh.getLastRow() - 1, 1), 1).getValues()
-    .map(function (r) { return String(r[0]).trim(); }).filter(String);
+  if (sh.getLastRow() < 2) return [];
+  return sh.getRange(2, 1, sh.getLastRow() - 1, 6).getValues()
+    .filter(function (r) { return String(r[0]).trim() !== '' && !isNaN(Number(r[0])) && String(r[2]).trim(); })
+    .map(function (r) { return { no: Number(r[0]), name: String(r[2]).trim(), contact: String(r[3]).trim(), address: String(r[4]).trim(), phone: String(r[5]).trim() }; });
+}
+
+function readVendorNames_() {
+  return readVendorInfo_().map(function (v) { return v.name; });
 }
 
 function readCombos_() {
@@ -729,7 +778,7 @@ function setupCore_() {
   CONFIG_DEFAULTS.forEach(function (d) { if (existing.indexOf(d[0]) < 0) cfg.appendRow(d); });
   var keys = cfg.getRange(1, 1, cfg.getLastRow(), 1).getValues();
   keys.forEach(function (k, i) {
-    if ([SUPPLEMENT_KEY, '週六出貨', '試跑模式', 'AI判讀', '輸出Excel', '輸出PDF', '貨運單粗體'].indexOf(k[0]) >= 0) cfg.getRange(i + 1, 2).insertCheckboxes();
+    if ([SUPPLEMENT_KEY, '週六出貨', '試跑模式', 'AI判讀', '輸出Excel', '輸出PDF', '貨運單粗體', '自動寫入庫存管理'].indexOf(k[0]) >= 0) cfg.getRange(i + 1, 2).insertCheckboxes();
     if (k[0] === '單據編號月份' || String(k[0]).indexOf('時間') >= 0) cfg.getRange(i + 1, 2).setNumberFormat('@');
   });
 
@@ -772,7 +821,9 @@ function setupCore_() {
   pt.getRange(2, 3, pt.getMaxRows() - 1, 1).insertCheckboxes();
   pt.getRange(2, 1, pt.getMaxRows() - 1, 8).setWrap(true).setVerticalAlignment('top');
   ensureSheet_(SHEET.HOLIDAYS, ['日期', '說明']);
-  ensureSheet_(LINE_SHEET.LOG, LOG_HEADERS).setFrozenRows(1);
+  var lg = ensureSheet_(LINE_SHEET.LOG, LOG_HEADERS);
+  lg.getRange(1, 1, 1, LOG_HEADERS.length).setValues([LOG_HEADERS]).setFontWeight('bold');
+  lg.setFrozenRows(1);
   var trial = ensureSheet_(LINE_SHEET.TRIAL, ORDER_HEADERS);
   trial.setFrozenRows(1);
   trial.getRange(2, COL['出貨日'] + 1, trial.getMaxRows() - 1, 1).setNumberFormat('yyyy-mm-dd');
