@@ -277,3 +277,17 @@ test('業務代訂與回收（李宗光的訊息）', () => {
   assert.ok(d.reasons.includes('指定促銷方案，請確認品項與價格'));
   assert.strictEqual(p('Johnson請款').kind, 'not_order');
 });
+
+test('型號與數量被標點分開、10搭1 寫法', () => {
+  const a = p('出三顆備用電池、2000型、謝謝');
+  assert.deepStrictEqual(a.items, [{ product: 'GPB-2000', qty: 3, pin8: 0 }]);
+  assert.strictEqual(a.vague, null);
+  assert.strictEqual(a.kind, 'order', a.reasons.join());
+  const b = p('您好，訂GPB-2000A，10塔1，感謝您');
+  assert.deepStrictEqual(b.items, [{ product: 'GPB-2000A', qty: 10, pin8: 0 }]);
+  assert.strictEqual(b.kind, 'order', b.reasons.join());
+  assert.deepStrictEqual(p('GPB-2000 10送1').items, [{ product: 'GPB-2000', qty: 10, pin8: 0 }]);
+  // 兩個型號都沒數量 → 不亂配
+  const c = p('GPB-2000、DCB-6000，各要\n5個');
+  assert.ok(c.reasons.some(x => x.includes('沒有數量')));
+});

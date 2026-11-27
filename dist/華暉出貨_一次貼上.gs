@@ -1,6 +1,6 @@
 /* 華暉出貨自動化：請整份貼進 Apps Script 的 Code.gs（取代原本內容）。由 scripts/bundle.js 產生，請勿手改。 */
 
-var APP_VERSION = '2026-11-27 07:12';
+var APP_VERSION = '2026-11-27 08:15';
 
 /**
  * 純邏輯（不呼叫任何 Google 服務），Apps Script 與 Node 測試共用。
@@ -527,6 +527,7 @@ var Parser = (function () {
     opts = opts || {};
     var aliases = opts.aliases || DEFAULT_ALIASES;
     var raw = normalize(text)
+      .replace(/(\d+)\s*[搭送塔加]\s*1(?!\d)/g, '$1+1') // 10搭1、10送1、10塔1（錯字）＝10+1
       // 「十顆」「兩顆」等中文數量 → 數字（只轉後面接單位的，避免「一店」被改掉）
       .replace(/([零〇一二兩两三四五六七八九十]{1,3})\s*(顆|個|組|台|付|副|片|入|盒|PCS)/g, function (all, n, u) {
         var v = cnNumber(n);
@@ -544,14 +545,15 @@ var Parser = (function () {
     raw = raw.replace(NO_TOOL, ' '); // 「不需工具」是備註，不是品項
     var lines = raw.split(/[\n\r,，、；;。]+/).map(function (l) { return l.trim(); }).filter(String);
     var items = [], reasons = [], notes = [];
-    var vagueQty = 0, pendingDcb = false, mentioned = false;
+    var vagueQty = 0, pendingDcb = false, mentioned = false, noQty = [];
 
     lines.forEach(function (line) {
       if (isQuestion(line)) return; // 詢問句不算下單
       var hits = findProducts(line, aliases);
       if (hits.length) mentioned = true;
       if (!hits.length) {
-        var vm = line.match(/(\d+)\s*\+\s*1/) || (VAGUE_WORDS.some(function (w) { return line.indexOf(w) >= 0; }) && line.match(new RegExp('(\\d+)\\s*' + UNIT)));
+        var vm = line.match(/(\d+)\s*\+\s*1/) || (VAGUE_WORDS.some(function (w) { return line.indexOf(w) >= 0; }) && line.match(new RegExp('(\\d+)\\s*' + UNIT))) ||
+          line.match(/^\D{0,6}?(\d+)\s*(?:顆|個|組|台|付|副|片|入|盒|PCS)/);
         if (vm) vagueQty += Number(vm[1]);
         return;
       }
@@ -581,14 +583,23 @@ var Parser = (function () {
         }
         if (!qty) {
           if (g.product === 'DCB-6000' && !g.pin) { pendingDcb = true; return; } // 例：先寫 DCB-6000，下一行才寫 (4pin)*2
-          reasons.push('「' + g.product + '」沒有數量');
+          noQty.push(g.product);
           return;
         }
         items.push({ product: g.product, qty: qty, pin8: g.product === 'DCB-6000' && g.pin === 8 ? qty : 0 });
       });
     });
 
-    if (pendingDcb && !items.some(function (it) { return it.product === 'DCB-6000'; })) reasons.push('「DCB-6000」沒有數量');
+    if (pendingDcb && !items.some(function (it) { return it.product === 'DCB-6000'; })) noQty.push('DCB-6000');
+    // 例：「出三顆備用電池、2000型」「GPB-2000A，10搭1」：型號和數量被標點分開
+    // 只有一個型號沒數量、而別處剛好有一個沒型號的數量 → 配在一起
+    noQty = unique(noQty);
+    if (noQty.length === 1 && vagueQty) {
+      items.push({ product: noQty[0], qty: vagueQty, pin8: 0 });
+      vagueQty = 0;
+      noQty = [];
+    }
+    noQty.forEach(function (prod) { reasons.push('「' + prod + '」沒有數量'); });
 
     // 合併同型號（DCB 的 4pin / 8pin 加總）
     var merged = [];
@@ -1632,6 +1643,13 @@ function suggestVague_(store, ctx) {
   return top ? { product: top, why: '這家店累計最常買的型號' } : null;
 }
 
+/** 解析測試手填的店家（可能是簡稱）→ 廠商清冊上的完整店名 */
+function resolveStoreInput_(name) {
+  if (!name) return '';
+  var vendors = readVendorNames_();
+  return Core.resolveVendor(name, vendors) || Parser.matchStore(name, readVendorInfo_()) || name;
+}
+
 /** 把品項整理成可比對的文字：型號×數量（8pin n），依型號排序 */
 function itemsKey_(items) {
   return (items || []).map(function (it) { return it.product + '×' + it.qty + (it.pin8 ? '(8pin' + it.pin8 + ')' : ''); }).sort().join(', ');
@@ -1655,7 +1673,7 @@ function menuCompareModels() {
   for (var i = 0; i < data.length && done < 15 && Date.now() - started < 270000; i++) {
     var text = String(data[i][0]).trim();
     if (!text || String(data[i][10]).trim()) continue;
-    var store = String(data[i][1]).trim();
+    var store = resolveStoreInput_(String(data[i][1]).trim());
     var expected = String(data[i][8]).trim();
     var expKey = expected ? itemsKey_(Parser.parse(expected, { aliases: base.aliases }).items) : '';
     var out = [];
@@ -1697,8 +1715,10 @@ function runParseTest() {
     var sug = '';
     if (res.vague && String(r[1]).trim()) {
       history = history || { cfg: readConfig_() };
-      var h = suggestVague_(String(r[1]).trim(), history);
-      sug = h ? h.product + '（' + h.why + '）' : '查無這家店的歷史訂單';
+      var st = resolveStoreInput_(String(r[1]).trim());
+      var h = mainIds_().length ? suggestVague_(st, history) : null;
+      sug = !mainIds_().length ? '未設定主檔試算表ID，無法查歷史訂單' :
+        h ? h.product + '（' + h.why + (st !== String(r[1]).trim() ? '；店家：' + st : '') + '）' : '查無「' + st + '」的歷史訂單';
     }
     return [
       kindText[res.kind],

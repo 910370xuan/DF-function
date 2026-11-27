@@ -98,6 +98,7 @@ var Parser = (function () {
     opts = opts || {};
     var aliases = opts.aliases || DEFAULT_ALIASES;
     var raw = normalize(text)
+      .replace(/(\d+)\s*[搭送塔加]\s*1(?!\d)/g, '$1+1') // 10搭1、10送1、10塔1（錯字）＝10+1
       // 「十顆」「兩顆」等中文數量 → 數字（只轉後面接單位的，避免「一店」被改掉）
       .replace(/([零〇一二兩两三四五六七八九十]{1,3})\s*(顆|個|組|台|付|副|片|入|盒|PCS)/g, function (all, n, u) {
         var v = cnNumber(n);
@@ -115,14 +116,15 @@ var Parser = (function () {
     raw = raw.replace(NO_TOOL, ' '); // 「不需工具」是備註，不是品項
     var lines = raw.split(/[\n\r,，、；;。]+/).map(function (l) { return l.trim(); }).filter(String);
     var items = [], reasons = [], notes = [];
-    var vagueQty = 0, pendingDcb = false, mentioned = false;
+    var vagueQty = 0, pendingDcb = false, mentioned = false, noQty = [];
 
     lines.forEach(function (line) {
       if (isQuestion(line)) return; // 詢問句不算下單
       var hits = findProducts(line, aliases);
       if (hits.length) mentioned = true;
       if (!hits.length) {
-        var vm = line.match(/(\d+)\s*\+\s*1/) || (VAGUE_WORDS.some(function (w) { return line.indexOf(w) >= 0; }) && line.match(new RegExp('(\\d+)\\s*' + UNIT)));
+        var vm = line.match(/(\d+)\s*\+\s*1/) || (VAGUE_WORDS.some(function (w) { return line.indexOf(w) >= 0; }) && line.match(new RegExp('(\\d+)\\s*' + UNIT))) ||
+          line.match(/^\D{0,6}?(\d+)\s*(?:顆|個|組|台|付|副|片|入|盒|PCS)/);
         if (vm) vagueQty += Number(vm[1]);
         return;
       }
@@ -152,14 +154,23 @@ var Parser = (function () {
         }
         if (!qty) {
           if (g.product === 'DCB-6000' && !g.pin) { pendingDcb = true; return; } // 例：先寫 DCB-6000，下一行才寫 (4pin)*2
-          reasons.push('「' + g.product + '」沒有數量');
+          noQty.push(g.product);
           return;
         }
         items.push({ product: g.product, qty: qty, pin8: g.product === 'DCB-6000' && g.pin === 8 ? qty : 0 });
       });
     });
 
-    if (pendingDcb && !items.some(function (it) { return it.product === 'DCB-6000'; })) reasons.push('「DCB-6000」沒有數量');
+    if (pendingDcb && !items.some(function (it) { return it.product === 'DCB-6000'; })) noQty.push('DCB-6000');
+    // 例：「出三顆備用電池、2000型」「GPB-2000A，10搭1」：型號和數量被標點分開
+    // 只有一個型號沒數量、而別處剛好有一個沒型號的數量 → 配在一起
+    noQty = unique(noQty);
+    if (noQty.length === 1 && vagueQty) {
+      items.push({ product: noQty[0], qty: vagueQty, pin8: 0 });
+      vagueQty = 0;
+      noQty = [];
+    }
+    noQty.forEach(function (prod) { reasons.push('「' + prod + '」沒有數量'); });
 
     // 合併同型號（DCB 的 4pin / 8pin 加總）
     var merged = [];

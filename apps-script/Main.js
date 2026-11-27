@@ -712,6 +712,13 @@ function suggestVague_(store, ctx) {
   return top ? { product: top, why: '這家店累計最常買的型號' } : null;
 }
 
+/** 解析測試手填的店家（可能是簡稱）→ 廠商清冊上的完整店名 */
+function resolveStoreInput_(name) {
+  if (!name) return '';
+  var vendors = readVendorNames_();
+  return Core.resolveVendor(name, vendors) || Parser.matchStore(name, readVendorInfo_()) || name;
+}
+
 /** 把品項整理成可比對的文字：型號×數量（8pin n），依型號排序 */
 function itemsKey_(items) {
   return (items || []).map(function (it) { return it.product + '×' + it.qty + (it.pin8 ? '(8pin' + it.pin8 + ')' : ''); }).sort().join(', ');
@@ -735,7 +742,7 @@ function menuCompareModels() {
   for (var i = 0; i < data.length && done < 15 && Date.now() - started < 270000; i++) {
     var text = String(data[i][0]).trim();
     if (!text || String(data[i][10]).trim()) continue;
-    var store = String(data[i][1]).trim();
+    var store = resolveStoreInput_(String(data[i][1]).trim());
     var expected = String(data[i][8]).trim();
     var expKey = expected ? itemsKey_(Parser.parse(expected, { aliases: base.aliases }).items) : '';
     var out = [];
@@ -777,8 +784,10 @@ function runParseTest() {
     var sug = '';
     if (res.vague && String(r[1]).trim()) {
       history = history || { cfg: readConfig_() };
-      var h = suggestVague_(String(r[1]).trim(), history);
-      sug = h ? h.product + '（' + h.why + '）' : '查無這家店的歷史訂單';
+      var st = resolveStoreInput_(String(r[1]).trim());
+      var h = mainIds_().length ? suggestVague_(st, history) : null;
+      sug = !mainIds_().length ? '未設定主檔試算表ID，無法查歷史訂單' :
+        h ? h.product + '（' + h.why + (st !== String(r[1]).trim() ? '；店家：' + st : '') + '）' : '查無「' + st + '」的歷史訂單';
     }
     return [
       kindText[res.kind],
