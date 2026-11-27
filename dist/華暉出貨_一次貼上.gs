@@ -1,6 +1,6 @@
 /* 華暉出貨自動化：請整份貼進 Apps Script 的 Code.gs（取代原本內容）。由 scripts/bundle.js 產生，請勿手改。 */
 
-var APP_VERSION = '2026-11-27 05:20';
+var APP_VERSION = '2026-11-27 06:15';
 
 /**
  * 純邏輯（不呼叫任何 Google 服務），Apps Script 與 Node 測試共用。
@@ -2642,9 +2642,9 @@ function recycleBlocks_() {
 /** 回收寫入當月區塊的下一個空白列；沒有空白列時在「小計」上方插入一列（沿用上一列的公式與格式） */
 function recordRecycle_(date, store, qty) {
   var month = date.getMonth() + 1;
-  var blocks = recycleBlocks_().filter(function (b) { return b.month === month; });
-  if (!blocks.length) throw new Error('主檔找不到「' + month + '月電力盒回收統計」，請先建立當月的表');
-  var b = blocks[blocks.length - 1];
+  var all = recycleBlocks_();
+  var blocks = all.filter(function (b) { return b.month === month; });
+  var b = blocks.length ? blocks[blocks.length - 1] : createMonthBlock_(all, month);
   var sh = b.sheet, c = b.cols;
   var lock = LockService.getScriptLock();
   lock.waitLock(30000);
@@ -2683,6 +2683,46 @@ function recordRecycle_(date, store, qty) {
   } finally {
     lock.releaseLock();
   }
+}
+
+/**
+ * 當月區塊不存在：把最後一個月份區塊（標題到小計）整段複製到它下方，清空資料、改標題月份。
+ * 公式、下拉選單、打勾框、格式都沿用；只新增列，不改動既有資料。
+ */
+function createMonthBlock_(all, month) {
+  if (!all.length) throw new Error('主檔找不到任何「N月電力盒回收統計」可以參考，請先手動建立 ' + month + ' 月的表');
+  var prev = all[all.length - 1];
+  var sh = prev.sheet;
+  var height = prev.subtotalRow - prev.titleRow + 1;
+  var width = Math.max(sh.getLastColumn(), 10);
+  var start = prev.subtotalRow + 2; // 空一列
+  var lastUsed = sh.getLastRow();
+  if (start <= lastUsed) {
+    var region = sh.getRange(start, 1, Math.min(height, lastUsed - start + 1), width).getValues();
+    if (region.some(function (r) { return r.some(function (v) { return String(v).trim() !== ''; }); })) start = lastUsed + 2;
+  }
+  if (sh.getMaxRows() < start + height) sh.insertRowsAfter(sh.getMaxRows(), start + height - sh.getMaxRows());
+  sh.getRange(prev.titleRow, 1, height, width).copyTo(sh.getRange(start, 1, height, width));
+  var title = String(sh.getRange(prev.titleRow, 1).getDisplayValue()).replace(/\d{1,2}(\s*月)/, month + '$1');
+  sh.getRange(start, 1).setValue(title);
+  // 清空資料列中「不是公式」的格子；打勾框改回未勾
+  var c = prev.cols;
+  var firstData = start + (prev.firstRow - prev.titleRow), dataRows = prev.subtotalRow - prev.firstRow;
+  if (dataRows > 0) {
+    var rng = sh.getRange(firstData, 1, dataRows, width);
+    var f = rng.getFormulas();
+    for (var i = 0; i < dataRows; i++) {
+      for (var k = 0; k < width; k++) {
+        if (f[i][k]) continue;
+        if (k === c.done) sh.getRange(firstData + i, k + 1).setValue(false);
+        else sh.getRange(firstData + i, k + 1).clearContent();
+      }
+    }
+  }
+  var created = { month: month, titleRow: start, headerRow: start + 1, firstRow: firstData, subtotalRow: start + height - 1, sheet: sh, cols: c };
+  notify_('【出貨】已在主檔建立「' + title + '」', '<p>收到 ' + month + ' 月的第一筆回收，主檔還沒有當月的回收統計，系統已照上個月的格式在「' +
+    esc_(sh.getName()) + '」第 ' + start + ' 列建立新表，請確認。</p>', []);
+  return created;
 }
 
 /** 所有區塊中的回收資料列 */
